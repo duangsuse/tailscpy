@@ -1,0 +1,10 @@
+[package]
+name = "rd"
+version = "0.0.0"
+edition = "2021"
+description = "活镜 wire 枚举、编解码、页面状态机；Android .so 与 WASM 两端和 bench 共用"
+
+[lib]
+crate-type = ["rlib", "cdylib"]   # cdylib 供 wasm32-unknown-unknown 产出 rd.wasm
+
+[dependencies]

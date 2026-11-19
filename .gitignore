@@ -1,0 +1,10 @@
+/.tmp/
+/target/
+/host-adb/out/
+/host-net/out/
+/viewer/dist/
+/bench/out/
+/*.log
+/e2e/out/
+/node_modules/
+/e2e/cases/*/

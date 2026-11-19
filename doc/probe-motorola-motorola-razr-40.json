@@ -1,0 +1,275 @@
+{
+ "p2": {
+  "windowOnVirtualDisplay": true,
+  "nodes": 203,
+  "collectionItemInfo_rowIndex": true,
+  "collectionInfo": true,
+  "ipcMs": {
+   "p50": 2.97401,
+   "p95": 4.019792,
+   "max": 86.186302
+  },
+  "framesDuringDump_p50": 3,
+  "verdict": "通过",
+  "fallback": "无需"
+ },
+ "jpeg": {
+  "note": "B 端 Bitmap.compress(JPEG)，1080x2640 整屏，中位数；设置首页（文字为主）",
+  "results": {
+   "q50": {
+    "msPerMP": 18.7,
+    "bytes": 95967,
+    "medianMs": 53.4
+   },
+   "q70": {
+    "msPerMP": 18.8,
+    "bytes": 114598,
+    "medianMs": 53.5
+   },
+   "q90": {
+    "msPerMP": 19.1,
+    "bytes": 163167,
+    "medianMs": 54.5
+   }
+  }
+ },
+ "p7": {
+  "power": "mWakefulness=Awake",
+  "stayOn": "mStayOn=true",
+  "verdict": "未判定：物理屏没能熄灭",
+  "fallback": "—",
+  "note": "mStayOn=true 表示设备正在充电且开着“充电时保持唤醒”，熄屏键被系统忽略；不得改表外设置，需拔电或用户关掉该开发者选项后再测"
+ },
+ "p4": {
+  "ascii": "keys",
+  "chinese": "paste",
+  "editTextContent": [
+   "wifi你好"
+  ],
+  "imeDump": "mInputShown=true\n  mDecorViewVisible=true mDecorViewWasVisible=true mWindowVisible=true mInShowWindow=false",
+  "verdict": "文本可输入",
+  "fallback": "无需",
+  "note": "输入法窗口是否出现在虚拟屏/物理屏见 imeDump 与截图（截图底部无键盘）",
+  "bottomPixel": [
+   0,
+   0,
+   0,
+   255
+  ]
+ },
+ "p1": [
+  {
+   "pkg": "com.azefsw.audioconnect",
+   "container": "RecyclerView ",
+   "rows": -1,
+   "verdict": "不支持滚轮（v=-1 无位移）",
+   "fallback": "分步拖动"
+  },
+  {
+   "pkg": "com.miui.calculator",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "com.android.settings",
+   "container": "ScrollView com.android.settings:id/settings_homepage_container",
+   "calibration": {
+    "dy": 357,
+    "F_eff": 357
+   },
+   "trials": [
+    {
+     "N": 1,
+     "dy": 0,
+     "dyLate": 0,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 5,
+     "dy": 4,
+     "dyLate": 4,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 37,
+     "dy": 36,
+     "dyLate": 36,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 120,
+     "dy": 119,
+     "dyLate": 119,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 333,
+     "dy": 332,
+     "dyLate": 332,
+     "exact": false,
+     "settled": true
+    }
+   ],
+   "verdict": "近似（0/5 精确）",
+   "fallback": "有动画或不精确的容器用分步拖动",
+   "edge": {
+    "extraShift": 0,
+    "bounce": "无"
+   }
+  },
+  {
+   "pkg": "com.absinthe.libchecker",
+   "container": "RecyclerView ",
+   "rows": 1,
+   "calibration": {
+    "dy": 168,
+    "F_eff": 168
+   },
+   "trials": [
+    {
+     "N": 1,
+     "dy": 1,
+     "dyLate": 1,
+     "exact": true,
+     "settled": true
+    },
+    {
+     "N": 5,
+     "dy": 5,
+     "dyLate": 5,
+     "exact": true,
+     "settled": true
+    },
+    {
+     "N": 37,
+     "dy": 37,
+     "dyLate": 37,
+     "exact": true,
+     "settled": true
+    },
+    {
+     "N": 120,
+     "dy": 120,
+     "dyLate": 120,
+     "exact": true,
+     "settled": true
+    },
+    {
+     "N": 333,
+     "dy": 333,
+     "dyLate": 333,
+     "exact": true,
+     "settled": true
+    }
+   ],
+   "verdict": "精确",
+   "fallback": "无需",
+   "edge": {
+    "extraShift": 336,
+    "bounce": "有位移（回弹/未到底）"
+   }
+  },
+  {
+   "pkg": "com.sirma.mobile.bible.android",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "de.szalkowski.activitylauncher",
+   "container": "ScrollView de.szalkowski.activitylauncher:id/content_main",
+   "calibration": {
+    "dy": 168,
+    "F_eff": 168
+   },
+   "trials": [
+    {
+     "N": 1,
+     "dy": 0,
+     "dyLate": 0,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 5,
+     "dy": 0,
+     "dyLate": 0,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 37,
+     "dy": 0,
+     "dyLate": 0,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 120,
+     "dy": 188,
+     "dyLate": 188,
+     "exact": false,
+     "settled": true
+    },
+    {
+     "N": 333,
+     "dy": 333,
+     "dyLate": 333,
+     "exact": true,
+     "settled": true
+    }
+   ],
+   "verdict": "近似（1/5 精确）",
+   "fallback": "有动画或不精确的容器用分步拖动",
+   "edge": {
+    "extraShift": 336,
+    "bounce": "有位移（回弹/未到底）"
+   }
+  },
+  {
+   "pkg": "com.android.calendar",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "InfinityLoop1309.NewPipeEnhanced",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "org.qpython.qpy",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "com.and96.aggregator_news",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  },
+  {
+   "pkg": "com.aefyr.sai",
+   "verdict": "无竖直滚动容器",
+   "fallback": "—"
+  }
+ ],
+ "p8": {
+  "orig": {
+   "window_animation_scale": "1.0",
+   "transition_animation_scale": "1.0",
+   "animator_duration_scale": "1.0",
+   "disable_window_blurs": "0"
+  },
+  "appliedDuringSession": [
+   "0",
+   "0",
+   "0",
+   "1"
+  ],
+  "restoredAfterMs": 572,
+  "verdict": "通过",
+  "note": "含 adb 往返开销"
+ }
+}

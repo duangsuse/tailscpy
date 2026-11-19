@@ -146,3 +146,10 @@ corpus/
 要逐个评估的特性：位移 / 画布（本地滚动）、页面缓存（返回）、Overlay、行引用、跨页引用、无损精灵、有损图片、预取、超高虚拟屏，以及 [40](40-codec.md) §12 的候选项。
 
 收益不明显、又增加复杂度的特性不进默认配置，并在报表里写明。
+
+## 实现备注（M0）
+
+- **人工录制优先**：`e2e/recorder.mjs` + `recorder.html`（本地服务直接落盘 `e2e/cases/<包名>.jsonl` 与截图，网页内可回放）、`e2e/run.mjs` 回放比对；格式与已知限制见 `e2e/README.md`。通用场景（`e2e/scenario.mjs`：`cold-open`、`scroll-down-up`、`enter-back`）排在它之后。
+- **手势确定性**（实测，设置 App）：事件间隔短于一帧或每步位移过大时，同一轨迹两次回放结果不同（14ms/107px 差 5–7%）；重采样成 30ms 间隔、每步 ≤ 60px、终点停 60ms 再抬手后，3 次回放逐像素一致。录制时浏览器只收轨迹、松手后一次性注入，保证“录的就是回放的”。
+- **语料录制器**（`Recorder.kt`，host 的 `rec_start` / `--record`）：`frames.bin` 每条 13 字节头（LE：seq u32、kind u8、rawLen u32、zLen u32）+ zlib 载荷；整帧每 120 帧一个关键帧，其余是变化行段 `[y0 u16 BE, n u16 BE, n 行 RGBA]`；`frames.idx` 每帧 16 字节（seq u32、t u32 ms、offset u64，LE）。树在 A11y 窗口状态 / 内容 / 滚动事件后去抖 250ms 取一棵。读取实现：`e2e/lib/trace.mjs`（已验证导出的帧与当时画面逐像素一致）、`bench/src/trace.rs`。
+- **bench**（`bench/`）：`Encoder` trait + 朴素基线（行 hash 脏带 → zstd）、整数微秒网络模型、`report.json`（无墙钟，两次逐字节相同）+ `timing.json`（墙钟）+ `frames.csv`、x264 对照（ffmpeg，veryfast/zerolatency/threads=1）。M0 未区分回访 / 回滚；离线真值、oracle、消融、白块指标、页面模拟模式留给后续里程碑。

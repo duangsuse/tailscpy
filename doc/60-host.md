@@ -131,3 +131,15 @@ com.and96.aggregator_news  com.aefyr.sai
   - **直接驱动**：点某个节点、滚轮滚多远、返回、输入文本、取一帧 PNG、打印节点树摘要、跑探针。录制（[80](80-corpus-bench.md) §3）和手工调试用。
   - **扮演 A**：收发 wire 类型的 JSON 形式（`Tap`、`View`、`Back`…），和 A 发来的消息走同一条处理路径。场景的实跑模式用（[80](80-corpus-bench.md) §5）。
 - 调试口不做鉴权，因此绝不能绑到回环以外的地址。
+
+## 实现备注（M0）
+
+- **调试口命令**（`host-adb/src/Debug.kt`）：`ping apps status open close quit frame frame_file tree stack tap long swipe path touch wheel back key text clipset clipget viewcfg scroll_to settle base mark step rec_start rec_stop jpeg_bench`。`open` 内部按 §1 顺序做：改设置 → 建虚拟屏 → 连 A11y → `force-stop` 后冷启动 App；启动时 `restore.json` 有遗留就先还原。
+- **“等变化阈值再静止”**（人工录制与回放的默认等待，`Platform.waitSettle`）：注入命令带 `settle:{change, settle_ms, timeout_ms, ignore}` 时，注入后先等相对注入前的帧有 ≥ `change`×高度 行 hash 不同，再等 `settle_ms` 内没有新的行变化，最长 `timeout_ms`；返回 `changed / settled / tChange / tSettle`，超时未静止时附 `volatile:[y0,y1)`（最近 1s 一直在变的行带，两侧各留 4 行）。`ignore:[[y0,y1)…]` 里的行不计变化也不阻止静止。`base` + `settle{from_base:true}` 用于“先记基准、过一会儿再等”。
+- **采集**：M0 先用 Kotlin 在 ImageReader 回调里拷贝最新帧并算行 hash（11 MB/帧 memcpy，实测可用）；**偏离了 §3 的“JNI 零拷贝直读”**。`libhj_host.so`（rd + host-net）目前只有 `Native.version()` 空壳，M1 把行 hash 和变化检测迁进 rd。虚拟屏标志位沿用旧项目验证过的组合（`PUBLIC|PRESENTATION|OWN_CONTENT_ONLY|SUPPORTS_TOUCH|ROTATES|DESTROY_ON_REMOVAL|TRUSTED|OWN_GROUP|UNLOCKED|NO_TOUCH_FEEDBACK|OWN_FOCUS|DEVICE_GROUP`，不含 `SHOULD_SHOW_SYSTEM_DECORATIONS`）。
+- **输入法**：Android 13+ 没有系统装饰的虚拟屏，输入法策略默认回落到**物理屏**弹键盘。`open` 里用 `IWindowManager.setDisplayImePolicy(displayId, 2 /*HIDE*/)` 隐藏；文本 ASCII 走 `KeyCharacterMap` 逐键注入，其余整段“设剪贴板 + `KEYCODE_PASTE`”。
+- **剪贴板**：`ClipboardManager` 必须用 `ShellContext` 自己构造（`ClipboardManager(Context, Handler)` 反射）；从系统上下文取出的实例调用包名是 `android`，被 AppOps 拒绝。
+- **滚轮**：`wheel{x,y,v,h}` 注入 `SOURCE_MOUSE` 的 `ACTION_SCROLL`，`v/h` 单位是格。像素 = 格 × 容器实际因子 `F_eff`，**因容器而异**（`ViewConfiguration` 报 168；RecyclerView 实测一致，设置首页的 `ScrollView` 实测 ≈357）。所以精确公式写成 `v = -(N+0.5)/F_eff`，`F_eff` 由 `e2e/lib/wheel.mjs` 的 `calibrate`（一格量位移）或 P1 探针结果给出。
+- **看门狗**：`sh` 脚本 `watchdog.sh` 每 0.5s `kill -0` host；读 `restore.json`（扁平 JSON，`null` = 原来没设置过 → delete）。踩过的坑：`sed` 输出末行无换行，`while read` 会丢掉最后一项（现在先补 `echo`）。
+- **唤醒锁**：`open` 持有 `PARTIAL_WAKE_LOCK`，`close` 释放。探针 P7 受设备“充电时保持唤醒”影响，见 `probe-*.md`。
+- **P3、P6**：M0 未做（P3 的 tall 默认关；P6 先全程用 `dumpsys` 查询）。P5 留给 M1 任务 11。

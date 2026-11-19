@@ -8,7 +8,7 @@
 2. 平台行为和文档不一致时，以真机实测为准：先更新 `doc/probe-<设备>.md`，再按该探针的“不通过时”一栏走。
 3. 阈值和开关一律进参数表（[50](50-protocol.md) §6），不写死在代码里。
 4. `rd` 里不读墙钟，不做 I/O。时间从帧和输入的时间戳来。这是 bench 能重放的前提。**区域/语义侦测**（`region.rs`）和**启发式/规则集合**（`heuristics.rs`，含精确滚轮公式、预测滚动等）各自放进单独文件，不要散落在状态机或编解码里。
-5. 每加一个工具或入口，就把它的 oneliner 补进 `./README`。
+5. 每加一个工具或入口，就把它的 oneliner 补进 `./README.md`。
 6. 从 M2 起，每个里程碑结束时跑一次 bench，把报表目录写进提交说明。
 7. `old/`、`old-ov/` 只是经验参考，不要照搬它的结构（它是“整屏对上一帧”的模型）。`cmp-scp/` 是对比用的 scrcpy 中继，不要改。
 
@@ -27,7 +27,7 @@
 
 | # | 做什么 | 读 | 怎么确认 |
 |---|---|---|---|
-| 01 | 仓库骨架：`host-adb/`、`rd/`、`host-net/`、`viewer/`、`bench/`、`e2e/`。`./README` 写明用 `mise use -g` 装哪些工具链（Rust 及 Android / WASM 目标、Android SDK 与 NDK、JDK / Kotlin、Node），以及构建、推送到 B 的 oneliner | GOAL §4 | 干净机器照 README 能构建出空壳的 .so、dex、wasm 并推到 B |
+| 01 | 仓库骨架：`host-adb/`、`rd/`、`host-net/`、`viewer/`、`bench/`、`e2e/`。`./README.md` 写明用 `mise use -g` 装哪些工具链（Rust 及 Android / WASM 目标、Android SDK 与 NDK、JDK / Kotlin、Node），以及构建、推送到 B 的 oneliner | GOAL §4 | 干净机器照 README 能构建出空壳的 .so、dex、wasm 并推到 B |
 | 02 | host 最小闭环：启动、建虚拟屏、启动一个白名单 App、采集（JNI 零拷贝直读）；调试口（取一帧 PNG）。系统设置的修改与四处还原（含独立 shell 看门狗子进程） | 60 §1–§4、§8、§10 | PNG 是该 App 首屏且没有状态栏；`kill -9` 杀掉 host 后不重启，2 秒内设置已回到原值 |
 | 03 | A11y 与栈：连 UiAutomation、按 display 取树（绑采集帧序号，含 `CollectionItemInfo.rowIndex`）、订阅事件、跟踪栈顶 | 60 §5、§7 | 调试口打印当前页的节点树摘要与列表条目 rowIndex；点进子页后栈深加一 |
 | 04 | 注入：点按、长按、触摸流、滚轮（精确像素公式）、`ACTION_SCROLL_TO_POSITION`、分步拖动、返回、按键、文本、剪贴板；串行队列 | 60 §6；30 §3 | 调试口发一次点按后帧变了；滚轮注入精确移动指定像素；能往搜索框里输入中文 |
@@ -103,3 +103,18 @@
 | 60 | 横向 tab / Drawer / 横向条带 | 30 §9 | NewPipe 左右切 tab 时本地有滑动动画，切回零像素流量 |
 | 61 | fg 视频区 | 40 §13 | 持续变化的区域走视频编码，其余区域不受影响 |
 | 62 | qpython 编辑器与文件界面的场景 | 80 §4 | `editor-type` 的性质成立 |
+
+## M0 进度（实现者记录）
+
+排序按用户要求调整：**人工录制（录制器网页 + 回放）排在 `scroll-down-up` 等通用场景之前**，已先做。
+
+| # | 状态 | 说明 |
+|---|---|---|
+| 01 | 完成 | 骨架 + `./README.md` + `./build.sh`；wasm、aarch64 `.so`、dex 能构建并推到 B（`ping` 返回 `rd 0.0.0`）。“干净机器照 README 构建”没有在另一台机器上验证 |
+| 02 | 完成（有偏差） | 首屏 PNG 无状态栏；`kill -9` 后 ≈0.5–0.8s 设置还原（含 adb 往返）。**采集没走 JNI 零拷贝**，见 [60](60-host.md) 实现备注 |
+| 03 | 完成 | `tree` 带 `rowIndex` / `CollectionInfo` / 可滚方向；点进子页栈深 1→2 |
+| 04 | 完成 | 点按、长按、触摸轨迹、滚轮（精确公式，`F_eff` 因容器而异）、`ACTION_SCROLL_TO_POSITION`、返回、按键、中文文本（粘贴）、剪贴板；串行注入 |
+| 05 | 部分 | P1、P2、P4、P8、JPEG 已测；P7 未判定（设备“充电时保持唤醒”）；P3、P6 未做；P5 留给 M1。见 `probe-*.md` |
+| 06 | 完成 | `rec_start` + `e2e/replay.mjs`；导出的帧与当时画面逐像素一致；时间戳单调 |
+| 07 | 完成 | 人工录制/回放 + `cold-open`、`scroll-down-up`、`enter-back`；“同一场景录两次帧内容一致”用 `--twice` 检查，结果见提交说明 |
+| 08 | 完成 | `bench/`：帧重放、朴素基线、网络模型、报表、x264；同一输入两次 `report.json` 逐字节相同 |
