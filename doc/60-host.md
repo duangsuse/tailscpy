@@ -119,7 +119,7 @@ com.and96.aggregator_news  com.aefyr.sai
 | P2 | 虚拟屏上的 A11y 与 IPC 耗时 | 能取到虚拟屏窗口的节点树、`CollectionItemInfo.rowIndex` 和滚动事件；量出取树 IPC 耗时分布（数十 ms）与相对画面的延迟 | 该设备只做整屏 `Fixed`（没有滚动优化） |
 | P3 | 超高虚拟屏与 `configChanges` | 每个 App：查 Activity 是否声明 `screenSize` 等 `configChanges`；测 resize 后多久出稳定帧、界面是否重建、滚动位置是否保留、最高能加到几倍、非列表部分有没有被拉伸 | 该 App `tall` 关（`tall` 默认本就关闭，只在活动切换边界改高度） |
 | P4 | 输入法策略 | 聚焦文本框后，虚拟屏和物理屏都不弹输入法，`Text` 能输入 | 文本改走剪贴板粘贴 |
-| P5 | 传输、DERP 抖动与 JPEG 编码速度 | HTTPS 托管页（含 Chrome 本地网络访问授权）和 localhost 页都能用证书 hash 连上 B；测 Tailscale 直连与 DERP 中继各自的吞吐与 P95 抖动；测本机 `rd` 编码整屏 JPEG 的耗时（ms/MP） | 必须修到通过；按实测编码耗时与抖动定 `ahead_margin_ms` 与分片参数 |
+| P5 | 传输与 DERP 抖动（M1 任务 11 完成；JPEG 编码速度基准在 M0 本地探针测） | HTTPS 托管页（含 Chrome 本地网络访问授权）和 localhost 页都能用证书 hash 连上 B；测 Tailscale 直连与 DERP 中继各自的吞吐与 P95 抖动 | 必须修到通过；按 M0 实测的 JPEG 编码耗时与本探针的抖动定 `ahead_margin_ms` 与分片参数 |
 | P6 | 栈回调 | 回调是否可用，和查询结果是否一致 | 用查询 |
 | P7 | 熄屏 | 物理屏熄灭一段时间后注入输入仍有新帧 | 会话期间保持亮屏并调低亮度 |
 | P8 | 设置还原（含看门狗） | `kill -9` 杀掉 host 后 2 秒内（不重启 host），看门狗已把动画与模糊还原到原值 | 必须修到通过 |
