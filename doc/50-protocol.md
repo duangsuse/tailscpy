@@ -75,7 +75,7 @@ struct Dst { region, x, y, w, h }
 enum Src { Canvas{page, region, x, y}, Sprite{hash, x, y} }
 ```
 
-`Fault.code`：`BadVersion`、`BadToken`、`OffWhitelist`、`AppGone`、`BlankFrame`、`Stale`、`Busy`。
+`Fault.code`：`BadVersion`、`BadToken`、`OffSession`（栈顶超出当前会话白名单策略，见 [60](60-host.md) §4）、`AppGone`、`BlankFrame`、`Stale`、`Busy`。
 
 ## 3. 握手与缓存对齐
 
@@ -118,9 +118,11 @@ sequenceDiagram
 ## 5. 传输
 
 - **只用 WebTransport**（QUIC），不做 WebSocket 回退。
-- **页面在 A 的 localhost 上**（WebTransport 和剪贴板都要求安全上下文，localhost 满足）。B 启动时打印完整 URL：
-  `http://localhost:<端口>/#b=<B 的 tailnet 地址:端口>&h=<证书 hash>&t=<token>`
-- **证书**：B 自签，ECDSA P-256，有效期小于 14 天（浏览器对 `serverCertificateHashes` 的要求）。证书落盘复用，快过期时换新并打印新 URL。
+- **页面是 HTTPS 托管的静态单页**，任何设备打开即用；开发时也可以用 `http://localhost`。两者都是安全上下文，WebTransport 和剪贴板可用。B 启动时打印完整 URL：
+  `https://<托管源>/#b=<B 的 tailnet 地址:端口>&h=<证书 hash>&t=<token>`
+- 托管源必须是自己控制的静态站：`#` 后的 token 对该源的脚本可见。
+- Chrome 147 起，公网源的页面连 tailnet 地址（100.64.0.0/10 属于本地地址空间）会弹一次“本地网络访问”授权。连接要由用户点击触发，被拒时给出说明。
+- **证书**：B 自签，ECDSA P-256，有效期小于 14 天（浏览器对 `serverCertificateHashes` 的要求）。证书落盘复用，过期换新并打印新 URL。不做轮换协议。
 - **鉴权**：`t` 是 B 生成并持久化的随机 token，随 `Hello` 发送。证书 hash 不是秘密，不能代替 token。
 - **监听地址**：只绑 tailnet 网卡和回环，不绑 0.0.0.0。
 - **包大小**：Tailscale 的 MTU 是 1280。QUIC 的 UDP 载荷固定在 1200，关掉路径 MTU 探测。暂不使用 QUIC 数据报；以后要用，单个数据报也要守住这个上限。
@@ -146,10 +148,10 @@ sequenceDiagram
 | `ahead_margin_ms` | 运动时预取提前量里的安全余量 | bench 定 |
 | `idle_ahead_ms` | 静止时向两侧预取多远（按时间计） | bench 定 |
 | `pre_inflight_ms` | 在途预取量的上限（按时间计） | bench 定 |
-| `tall` | 是否允许超高虚拟屏（按 App） | 探针通过的 App 开 |
+| `tall` | 是否允许超高虚拟屏（按 App） | 关；bench 显示 1× 下白块明显、且探针通过的 App 才开 |
 | `tall_k` | 加高倍数 | 探针给出的可用上限以内 |
 | `img_lossy` / `img_q` | 图片是否有损、质量 | 开；bench 定 |
-| `zstd_level` | 字面量压缩级别 | 沿用旧项目的 3 |
+| `zstd_level` | 字面量压缩级别 | 随发送队列自适应：队列空时用 3，有积压时升档。按条带并行编码 |
 | `pool_mb` | 精灵池容量 | 沿用旧项目的 64 |
 | `cache_mb` | A 的页面缓存容量 | bench 定 |
 | `live` | 该页 / 该 App 是否始终跟随视口 | 关 |
@@ -165,6 +167,6 @@ sequenceDiagram
 | A11y 是否可用、有没有给出滚动区和图片节点 | 是否启用区域 / 精灵 / 图片判定 |
 | 滚轮探针是否通过 | 采集头用滚轮还是分步拖动 |
 | 超高屏探针结果、最近 resize 耗时 | `tall`、`tall_k` |
-| 图片面积占比 | `img_q`、`zstd_level`（图片多的 App 压缩级别调低，省编码时间） |
+| 图片面积占比 | `img_q` |
 | 典型滚速、可绘制耗时 | 预取距离 |
 | 无输入时的变化频率 | 是否默认 `live` |

@@ -4,7 +4,7 @@
 
 ## 1. 启动
 
-1. 页面是静态文件，由 A 本机的静态服务器提供（README 给 oneliner）。必须是 `http://localhost`，否则 WebTransport 和剪贴板不可用。
+1. 页面是静态单页，由 HTTPS 源托管；开发时由 A 本机的静态服务器提供（README 给 oneliner）。必须是安全上下文（HTTPS 或 `http://localhost`），否则 WebTransport 和剪贴板不可用。
 2. 从 URL 的 `#` 后读出 B 的地址、证书 hash、token（[50](50-protocol.md) §5）。缺任何一项 → 显示说明页。
 3. 打开 OPFS，读出 `cache_id` 和 `cache_rev`（没有就新建）。
 4. 用证书 hash 连 WebTransport → `Hello` → 按 `Welcome` 对齐缓存。
@@ -135,9 +135,9 @@ hj/<cache_id>/
 | 断线 | 画面保留，可以继续本地滚动浏览已缓存内容；输入禁用并显示“重连中”；退避重连 |
 | 收到 `Replaced` | 显示“已在别处打开”，不自动重连 |
 | `Fault{Stale}` | 把刚更新的区域闪一下，提示再点一次 |
-| `Fault{OffWhitelist}` | 提示“该操作会离开白名单，已返回” |
+| `Fault{OffSession}` | 提示“该操作超出会话允许的应用范围，已返回” |
 | `Fault{BlankFrame}` | 提示“B 端画面为空（受保护内容或 App 未启动）” |
 | 无法应用某个 `Tx` | [10](10-dataflow.md) §7 的 `Resync` 流程 |
-| 手机浏览器 | 单指映射同上；双指缩放只改显示缩放。localhost 页面由谁提供见 GOAL §7-6 |
+| 手机浏览器 | 单指映射同上；双指缩放只改显示缩放。打开的是同一个 HTTPS 托管页 |
 | 设备像素比不是整数 | 文字会被重采样而发虚。面板提示，并提供“1:1 显示”开关 |
 | 解码中用户已滚走 | 照常应用。占位是否消失只看画布有没有内容 |
