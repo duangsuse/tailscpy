@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>活镜 · 字节与延迟</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#16181d; --muted:#5b6270; --border:#d9dde5; --surface:#f5f7fa;
+    --accent:#2f6fd0; --ok:#1f8a4c; --warn:#b26a00; --err:#c0392b;
+    --c1:#2f6fd0; --c2:#1f8a4c; --c3:#b26a00; --c4:#8b5cf6; --c5:#c0392b; --c6:#0891b2;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#12141a; --fg:#e8eaee; --muted:#9aa3b2; --border:#2b303a; --surface:#1a1d25;
+           --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+           --c1:#6ea8fe; --c2:#4ade80; --c3:#fbbf24; --c4:#c4b5fd; --c5:#f87171; --c6:#22d3ee; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:26px;margin:0 0 6px}
+  h2{font-size:19px;margin:38px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;margin:20px 0 6px;color:var(--muted);font-weight:600}
+  p{margin:8px 0}
+  .lead{color:var(--muted);font-size:16px}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--surface);font-weight:600}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  .card{border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin:10px 0;background:var(--surface)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px}
+  .note{border-left:3px solid var(--warn);padding:8px 12px;background:var(--surface);margin:12px 0;border-radius:0 8px 8px 0}
+  .ok{border-left-color:var(--ok)} .err{border-left-color:var(--err)}
+  figure{margin:16px 0} figcaption{color:var(--muted);font-size:13px;margin-top:6px}
+  svg{max-width:100%;height:auto;display:block}
+  .bar{height:14px;border-radius:3px}
+  .row{display:flex;align-items:center;gap:8px;margin:3px 0}
+  .row .lab{width:190px;flex:none;font-size:13px;color:var(--muted)}
+  .row .val{width:92px;flex:none;text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+  .row .track{flex:1;background:var(--surface);border-radius:3px;overflow:hidden}
+  .row .fill{height:100%}
+  ul{margin:6px 0 6px 20px;padding:0} li{margin:4px 0}
+  .pill{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid var(--border);border-radius:999px;color:var(--muted);margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>活镜 · 字节与延迟</h1>
+<p class="lead">下行流量花在哪、每个机制值多少字节、以及为什么"省字节"和"降延迟"是同一件事。</p>
+<p>
+  <span class="pill">语料：~/corpus/razr-20261117，11 个 App / 786 帧 / 1080×2640</span>
+  <span class="pill">设备 PNG 240.1MB</span>
+  <span class="pill">本编码 65.7MB（27.4%）</span>
+  <span class="pill">每帧中位 0.7KB · p90 146KB</span>
+</p>
+
+<h2>1 · 字节去哪了（按交互类型）</h2>
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="每帧字节按交互类型的中位与 p90">
+  <g font-family="system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="8" y="18" fill="var(--muted)">每帧字节（786 帧 / 11 个 App）</text>
+    <g>
+      <text x="8" y="44">back（返回/退到桌面）</text>
+      <rect x="190" y="32" width="38" height="14" fill="var(--c3)" opacity=".45"/><text x="236" y="44" fill="var(--muted)">中位 9.8KB</text>
+      <rect x="560" y="32" width="330" height="14" fill="var(--c3)"/><text x="898" y="44" fill="var(--muted)">p90 1747KB</text>
+    </g>
+    <g>
+      <text x="8" y="84">tap（点按）</text>
+      <rect x="190" y="72" width="102" height="14" fill="var(--c1)" opacity=".45"/><text x="300" y="84" fill="var(--muted)">中位 26KB</text>
+      <rect x="560" y="72" width="29" height="14" fill="var(--c1)"/><text x="597" y="84" fill="var(--muted)">p90 152KB</text>
+    </g>
+    <g>
+      <text x="8" y="124">scroll_step（滚动步）</text>
+      <rect x="190" y="112" width="4" height="14" fill="var(--c2)" opacity=".45"/><text x="202" y="124" fill="var(--muted)">中位 0KB</text>
+      <rect x="560" y="112" width="16" height="14" fill="var(--c2)"/><text x="584" y="124" fill="var(--muted)">p90 86KB</text>
+    </g>
+    <g>
+      <text x="8" y="164">launch（进 App）</text>
+      <rect x="190" y="152" width="250" height="14" fill="var(--c4)" opacity=".45"/><text x="448" y="164" fill="var(--muted)">中位 64KB</text>
+      <rect x="560" y="152" width="254" height="14" fill="var(--c4)"/><text x="822" y="164" fill="var(--muted)">p90 1347KB</text>
+    </g>
+    <g>
+      <text x="8" y="204">scroll_end（滚动收尾）</text>
+      <rect x="190" y="192" width="4" height="14" fill="var(--c2)" opacity=".45"/><text x="202" y="204" fill="var(--muted)">中位 0KB</text>
+      <rect x="560" y="192" width="8" height="14" fill="var(--c2)"/><text x="576" y="204" fill="var(--muted)">p90 42KB</text>
+    </g>
+    <g>
+      <text x="8" y="244">recover（恢复）</text>
+      <rect x="190" y="232" width="30" height="14" fill="var(--c6)" opacity=".45"/><text x="228" y="244" fill="var(--muted)">中位 7.7KB</text>
+      <rect x="560" y="232" width="18" height="14" fill="var(--c6)"/><text x="586" y="244" fill="var(--muted)">p90 93KB</text>
+    </g>
+    <line x1="190" y1="24" x2="190" y2="254" stroke="var(--border)"/>
+    <line x1="560" y1="24" x2="560" y2="254" stroke="var(--border)"/>
+    <text x="190" y="270" fill="var(--muted)">← 中位（条长按比例）</text>
+    <text x="560" y="270" fill="var(--muted)">← p90（条长按比例，最大 1747KB）</text>
+    <text x="8" y="290" fill="var(--muted)">全部 786 帧：中位 0.7KB · p90 146KB · 31% 的帧 &gt; 30KB；back 一类就占 48.6% 的下行字节</text>
+  </g>
+</svg>
+<figcaption>尾巴不是滚动，是<b>整屏照片与换页</b>：滚动步中位 0KB；back 一类占 48.6% 的下行字节（p99 2.3MB = 设备壁纸，日历月视图 1.8MB）。</figcaption>
+</figure>
+
+<h2>2 · 每个机制值多少字节（消融：逐个关掉再重测）</h2>
+<table>
+  <thead><tr><th>机制</th><th>作用</th><th class="num">关掉后</th><th class="num">耗时影响</th><th>结论</th></tr></thead>
+  <tbody>
+    <tr><td>整行搬移 COPY</td><td>滚动</td><td class="num">+15.4%</td><td class="num">+1.1ms</td><td>必须留</td></tr>
+    <tr><td><b>精灵池 RETAIN/SPRITE_REF</b></td><td>见过再回来的内容<br>（含"返回上一页"的整页缓存）</td><td class="num">+12.0%<br><b>+65.0%</b></td><td class="num">≈0</td><td><b>最值钱的一块</b></td></tr>
+    <tr><td>页面级返回缓存</td><td>返回上一页整屏命中</td><td class="num">（含在池里）</td><td class="num">≈0</td><td>要页面稳定 ≥120ms 才生效</td></tr>
+    <tr><td>滚动画布（内容坐标）</td><td>按坐标精确找回</td><td class="num">−0.3%</td><td class="num">≈0</td><td>最复杂、收益最小 → 已被 tile 地图取代</td></tr>
+    <tr><td>边缘带搬移</td><td>滚动条滑块</td><td class="num">0.0%</td><td class="num">≈0</td><td>滑块淡入淡出时搬不动</td></tr>
+    <tr><td>字面量可逆变换</td><td>图片类矩形：通道去相关 + 行差分</td><td class="num">照片 −30%</td><td class="num">+1 遍内存</td><td>已落地</td></tr>
+    <tr><td>去掉滚动与池（只留 FILL/LIT）</td><td>基线对照</td><td class="num">+36.1%</td><td class="num">≈0</td><td>两个机制合起来值一倍（真实节奏）</td></tr>
+    <tr><td>字面量无损 WebP</td><td>换编码器</td><td class="num">−50%</td><td class="num">467–1099ms/整屏</td><td><b>实时不可用</b>（B 端太慢）</td></tr>
+  </tbody>
+</table>
+<div class="note ok">
+<b>时间间隔会改变结论</b>：消融用 33ms/帧 的模拟时钟，"页面稳定 ≥120ms 才登记整页"几乎不触发，
+于是<b>把精灵池最大的用途（返回缓存）藏起来了</b>：它的贡献从 12% 变成 <b>65%</b>，
+整包字节从 65.7MB 降到 <b>44.6MB</b>（200ms/帧，接近真人节奏）。
+表里左边的百分比是模拟时钟，右边加粗的是真实节奏。
+</div>
+
+<h2>3 · 字节 = 延迟</h2>
+<div class="grid">
+  <div class="card"><h3>A 端解码</h3><p>字面量越大，zstd 解压 + 搬进帧缓冲越久。同一批语料：关掉 COPY（+20% 字节）→ 解码中位 3.7→4.1ms。</p></div>
+  <div class="card"><h3>传输</h3><p>字节 × 8 ÷ 带宽 + RTT/2。2.3MB 的壁纸帧在 10Mbit/s 上就是 1.9 秒。</p></div>
+  <div class="card"><h3>上屏</h3><p>只贴脏矩形，所以这一项与字节无关；帧的<b>个数</b>才影响上屏次数。</p></div>
+</div>
+<p>⇒ <b>省字节的杠杆同时就是省延迟的杠杆</b>；不需要两套优化计划。唯一例外是"首次出现的整屏照片"：
+它的字节省不掉（无损就是这么大），只能靠<b>先有损、静止后升级</b>来换"首帧快"（未实现）。</p>
+
+<h2>4 · 延迟分段（真机：razr 40，mm1 构建）</h2>
+<p class="lead" style="font-size:14px">端到端（输入→首个新帧，2026-11-18 真机 razr 40，多轮）：连续滚轮 p50 <b>13–22ms</b> / p90 37–89ms；甩动 26.3/46.8；离散滚动手势 79.9/<b>90.8ms</b> ⇒ <b>p90 ≤120ms 达标</b>。逐帧 0px 全部通过。</p>
+<table>
+  <thead><tr><th>环节</th><th class="num">典型值</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>输入 → 注入完成</td><td class="num">1.2ms</td><td>真机（razr 40）</td></tr>
+    <tr><td><b>→ ImageReader 回调（App 响应+合成）</b></td><td class="num"><b>5.7–72.6ms</b></td><td><b>主导项，在设备侧</b></td></tr>
+    <tr><td>→ 抓帧读回 + 去跨距</td><td class="num">0.7–1.0ms</td><td></td></tr>
+    <tr><td>→ 等编码槽（帧率上限+背压）</td><td class="num">0.9–4.2ms</td><td>30→60fps 省约 4ms</td></tr>
+    <tr><td>B：比较 + 哈希 + 编码</td><td class="num">1.2–2.8ms</td><td>行哈希 + zstd</td></tr>
+    <tr><td>B：写 socket</td><td class="num">0.2–0.3ms</td><td></td></tr>
+    <tr><td>A：解码</td><td class="num">1.1ms</td><td>Rust WASM（旧的 JS 解码器 p50 16.7ms）</td></tr>
+    <tr><td>B：编码（WebP 无损）</td><td class="num">467–1099ms</td><td>整屏照片 → 不可用</td></tr>
+  </tbody>
+</table>
+
+<h2>5 · tile 地图带来的新杠杆</h2>
+<figure>
+<svg viewBox="0 0 960 200" role="img" aria-label="滚动时只有原点变化">
+  <g font-family="system-ui, sans-serif" font-size="12" fill="currentColor">
+    <text x="16" y="28" fill="var(--muted)">内容空间（无限画布）</text>
+    <rect x="16" y="38" width="240" height="34" rx="4" fill="var(--c2)" opacity=".28"/><text x="30" y="60">tile 行 0..40</text>
+    <rect x="256" y="38" width="240" height="34" rx="4" fill="var(--c2)" opacity=".28"/><text x="270" y="60">tile 行 40..80</text>
+    <rect x="496" y="38" width="240" height="34" rx="4" fill="var(--c2)" opacity=".28"/><text x="510" y="60">tile 行 80..120</text>
+    <text x="16" y="118" fill="var(--muted)">视口（原点 o）</text>
+    <rect x="16" y="128" width="480" height="44" rx="4" fill="none" stroke="var(--accent)" stroke-width="2"/>
+    <rect x="60" y="128" width="240" height="44" fill="var(--accent)" opacity=".18"/>
+    <text x="30" y="155">滚 40px：只有 origin 变（−40），tile 一个字节都不用发</text>
+    <text x="520" y="155" fill="var(--muted)">长截图 = 内容空间本身</text>
+  </g>
+</svg>
+<figcaption>滚动帧在 tile 地图里几乎是 0 字节；旧做法要发整行搬移或退化��整屏字面量。</figcaption>
+</figure>
+
+<h2>6 · 还没做的（按值不值排序）</h2>
+<ul>
+  <li><b>有损精灵 + 升级</b>（照片的"先有损、静止后补无损"）：省的是<b>首帧时间</b>，不省总字节。工程量最大。</li>
+  <li><b>字形精灵</b>（离线结论 −8.4%，文字多的列表页更多）：需要字形切分与图集。</li>
+  <li><b>横向偏移</b>（tile 粒度从"整行"到"2×2 行块"）：拼图式界面才需要。</li>
+  <li><b>视频区</b>：协议留了通道，实现为零。</li>
+</ul>
+
+<p class="lead" style="margin-top:40px">细节见 <span class="mono">mm1/doc/10-codec-modules.md</span> 与 <span class="mono">mm1/doc/25-tile-map.md</span>；
+架构总览见 <a href="architecture.html">architecture.html</a>。</p>
+
+</div>
+</body>
+</html>

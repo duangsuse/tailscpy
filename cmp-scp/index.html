@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>活镜</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#aaa;font:14px sans-serif;overflow:hidden;overscroll-behavior:none}
+  body{display:flex;flex-direction:column}
+  #screen{flex:1;min-height:0;display:flex;justify-content:center}
+  canvas{max-width:100%;max-height:100%;touch-action:none;background:#111;user-select:none}
+  #bar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#111}
+  #bar button{flex:none;padding:8px 18px;font-size:16px}
+  #st{margin-left:auto}
+</style>
+</head>
+<body>
+<div id="screen"><canvas id="c" width="540" height="1200"></canvas></div>
+<div id="bar"><button id="back">◁</button><button id="home">○</button><span id="st">连接中…</span></div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d'), st = document.getElementById('st');
+let W = 0, H = 0, dec = null, cfg = null, wantKey = true, ws, nFrames = 0, lagSum = 0, t0 = performance.now();
+
+function status(s) { st.textContent = s; }
+
+function newDecoder(sps) {
+  if (dec && dec.state !== 'closed') dec.close();
+  dec = new VideoDecoder({
+    output(f) { cv.width = f.displayWidth; cv.height = f.displayHeight; ctx.drawImage(f, 0, 0); f.close(); },
+    error(e) { status('解码错误: ' + e.message); wantKey = true; },
+  });
+  // annexb: 00 00 00 01 | NAL 头 | profile | 约束 | level
+  const codec = 'avc1.' + [sps[5], sps[6], sps[7]].map(b => b.toString(16).padStart(2, '0')).join('');
+  dec.configure({codec, avc: {format: 'annexb'}, optimizeForLatency: true});
+}
+
+function onPacket(buf) {
+  const dv = new DataView(buf), hi = dv.getUint32(0);
+  if (hi & 0x80000000) { W = dv.getUint32(4); H = dv.getUint32(8); return; }  // session: 宽高
+  const pts = Number(dv.getBigUint64(0) & ((1n << 61n) - 1n));
+  const config = !!(hi & 0x40000000), key = !!(hi & 0x20000000);
+  const body = new Uint8Array(buf, 12);
+  if (config) { cfg = body; newDecoder(body); wantKey = true; return; }
+  if (!dec || dec.state !== 'configured') return;
+  if (wantKey && !key) return;
+  let data = body;
+  if (key) { data = new Uint8Array(cfg.length + body.length); data.set(cfg); data.set(body, cfg.length); }
+  wantKey = false;
+  dec.decode(new EncodedVideoChunk({type: key ? 'key' : 'delta', timestamp: pts, data}));
+  nFrames++;
+}
+
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => status('已连接');
+  ws.onmessage = e => onPacket(e.data);
+  ws.onclose = () => { status('断开，重连中…'); setTimeout(connect, 1000); };
+}
+
+setInterval(() => {
+  const s = (performance.now() - t0) / 1000;
+  if (ws && ws.readyState === 1) status(`${W}x${H} ${(nFrames / s).toFixed(0)}fps`);
+  nFrames = 0; t0 = performance.now();
+}, 1000);
+
+function send(b) { if (ws && ws.readyState === 1) ws.send(b); }
+
+// 触摸：INJECT_TOUCH_EVENT = 类型2 | 动作1 | pointerId8 | x4 y4 w2 h2 | 压力2 | actionButton4 | buttons4 = 32 字节
+function touch(action, e) {
+  if (!W) return;
+  const r = cv.getBoundingClientRect();
+  const x = Math.max(0, Math.min(W - 1, Math.round((e.clientX - r.left) / r.width * W)));
+  const y = Math.max(0, Math.min(H - 1, Math.round((e.clientY - r.top) / r.height * H)));
+  const b = new DataView(new ArrayBuffer(32));
+  b.setUint8(0, 2); b.setUint8(1, action);
+  b.setBigInt64(2, BigInt(e.pointerId));
+  b.setUint32(10, x); b.setUint32(14, y);
+  b.setUint16(18, W); b.setUint16(20, H);
+  b.setUint16(22, action === 1 ? 0 : 0xffff);
+  send(b.buffer);
+}
+const down = new Set();
+cv.addEventListener('pointerdown', e => { cv.setPointerCapture(e.pointerId); down.add(e.pointerId); touch(0, e); e.preventDefault(); });
+cv.addEventListener('pointermove', e => { if (down.has(e.pointerId)) touch(2, e); });
+for (const ev of ['pointerup', 'pointercancel'])
+  cv.addEventListener(ev, e => { if (down.delete(e.pointerId)) touch(1, e); });
+
+// 返回：BACK_OR_SCREEN_ON(4) 按下/抬起；主页：INJECT_KEYCODE(0) 动作1 键码4 重复4 meta4，KEYCODE_HOME=3
+function key(action, code) { const b = new DataView(new ArrayBuffer(14)); b.setUint8(1, action); b.setUint32(2, code); send(b.buffer); }
+document.getElementById('back').onclick = () => { send(new Uint8Array([4, 0])); send(new Uint8Array([4, 1])); };
+document.getElementById('home').onclick = () => { key(0, 3); key(1, 3); };
+
+connect();
+</script>
+</body>
+</html>

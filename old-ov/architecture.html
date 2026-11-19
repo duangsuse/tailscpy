@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>活镜 · 架构与数据面</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#16181d; --muted:#5b6270; --border:#d9dde5; --surface:#f5f7fa;
+    --accent:#2f6fd0; --ok:#1f8a4c; --warn:#b26a00; --err:#c0392b;
+    --c1:#2f6fd0; --c2:#1f8a4c; --c3:#b26a00; --c4:#8b5cf6; --c5:#c0392b; --c6:#0891b2;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#12141a; --fg:#e8eaee; --muted:#9aa3b2; --border:#2b303a; --surface:#1a1d25;
+           --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+           --c1:#6ea8fe; --c2:#4ade80; --c3:#fbbf24; --c4:#c4b5fd; --c5:#f87171; --c6:#22d3ee; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:26px;margin:0 0 6px}
+  h2{font-size:19px;margin:40px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--muted);font-weight:600}
+  p{margin:8px 0}
+  .lead{color:var(--muted);font-size:16px;margin:0 0 8px}
+  .tag{display:inline-block;font-size:12px;padding:2px 8px;border:1px solid var(--border);
+       border-radius:999px;color:var(--muted);margin-right:6px}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+  th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--surface);font-weight:600}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  .card{border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin:10px 0;background:var(--surface)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+  .note{border-left:3px solid var(--warn);padding:8px 12px;background:var(--surface);margin:12px 0;border-radius:0 8px 8px 0}
+  .ok{border-left-color:var(--ok)} .err{border-left-color:var(--err)}
+  figure{margin:16px 0} figcaption{color:var(--muted);font-size:13px;margin-top:6px}
+  svg{max-width:100%;height:auto;display:block}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:8px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}
+  ul{margin:6px 0 6px 20px;padding:0} li{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>活镜 · 架构与数据面</h1>
+<p class="lead">B（Android 手机）的虚拟屏 → <b>逐像素无损</b>传到 A（浏览器/手机）；A 的点按 / 滑动 / 返回 → 注入回 B。</p>
+<p class="lead" style="font-size:14px;margin-top:6px"><b>这一页回答三个问题</b>：① 数据怎么流（B 抓帧 → 编码 → 通道 → A 解码 → 上屏）；② 每个部件负责什么；③ 为什么不用 H.264 视频流。</p>
+<p>
+  <span class="tag">0px = 帧缓冲逐像素相等</span>
+  <span class="tag">布局层 / 精灵池 / 视频区（三层）</span>
+  <span class="tag">Rust 端到端</span>
+  <span class="tag">自签证书 + Tailscale</span>
+</p>
+
+<h2>1 · 一帧是怎么传的</h2>
+<figure>
+<svg viewBox="0 0 980 300" role="img" aria-label="B 端到 A 端的数据流">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g font-family="system-ui, sans-serif" font-size="13" fill="currentColor">
+    <!-- B 侧 -->
+    <rect x="16" y="26" width="380" height="248" rx="12" fill="none" stroke="var(--border)" stroke-dasharray="4 3"/>
+    <text x="30" y="48" fill="var(--muted)">B 端（被控 Android）</text>
+    <rect x="36" y="64" width="150" height="56" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="48" y="86">Kotlin 平台层</text>
+    <text x="48" y="105" fill="var(--muted)">虚拟屏 / 抓帧 / 注入</text>
+    <rect x="206" y="64" width="170" height="56" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="218" y="86">Rust host (.so)</text>
+    <text x="218" y="105" fill="var(--muted)">会话 / 背压 / 统计</text>
+    <rect x="36" y="152" width="340" height="96" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="48" y="174">hj-codec Encoder</text>
+    <text x="48" y="196" fill="var(--muted)">行哈希 → 整行搬移 → 精灵池 → 残差字面量</text>
+    <text x="48" y="216" fill="var(--muted)">只发"已验证等于目标画面"的动作 ⇒ 0px</text>
+    <text x="48" y="236" fill="var(--muted)">B 持有 A 帧缓冲的镜像</text>
+    <!-- A 侧 -->
+    <rect x="584" y="26" width="380" height="248" rx="12" fill="none" stroke="var(--border)" stroke-dasharray="4 3"/>
+    <text x="598" y="48" fill="var(--muted)">A 端（浏览器）</text>
+    <rect x="604" y="64" width="340" height="56" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="616" y="86">hj.js（只做 I/O：WS / canvas / 指针）</text>
+    <text x="616" y="105" fill="var(--muted)">只贴脏矩形，不全屏重传</text>
+    <rect x="604" y="152" width="340" height="96" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <text x="616" y="174">viewer.wasm（Rust）</text>
+    <text x="616" y="196" fill="var(--muted)">协议编解码 + 帧解码 + 输入编码</text>
+    <text x="616" y="216" fill="var(--muted)">帧缓冲 RGBA + 逐帧哈希自检</text>
+    <text x="616" y="236" fill="var(--muted)">回 Shown(fid, decode_us) 做背压</text>
+    <!-- 连线 -->
+    <path d="M376,190 L596,100" stroke="var(--c1)" stroke-width="2" fill="none" marker-end="url(#ar)" color="var(--c1)"/>
+    <text x="420" y="140" fill="var(--c1)">frames 通道：fid+flags+操作流</text>
+    <path d="M596,232 L380,132" stroke="var(--c2)" stroke-width="2" fill="none" marker-end="url(#ar)" color="var(--c2)"/>
+    <text x="404" y="262" fill="var(--c2)">up 通道：触摸批次 / Shown / Verify</text>
+  </g>
+</svg>
+<figcaption>下行是"操作流"而不是像素流；上行只有几十字节。两条线互不阻塞（不同通道）。</figcaption>
+</figure>
+
+<h2>2 · 像 tile 地图一样理解数据面</h2>
+<div class="grid">
+  <div class="card">
+    <h3>摄像机移动 = 整行搬移</h3>
+    <p>列表滚 40px，本质是"地图往下挪 40 格"，不用重画。行哈希投票找出位移，<b>不物化平移后的画面</b>（省掉几十 MB 读写）。</p>
+  </div>
+  <div class="card">
+    <h3>tile 缓存 = 精灵池</h3>
+    <p>滚出屏幕的行登记成条带（id = 内容哈希，相同内容自动去重），滚回来直接贴。返回上一页时整屏贴回，几乎免费。</p>
+  </div>
+  <div class="card">
+    <h3>回到旧地图 = 整帧引用</h3>
+    <p>画面和之前完全一样就说"回到第 N 张地图"，<b>1 字节</b>。</p>
+  </div>
+  <div class="card">
+    <h3>新地块 = 字面量</h3>
+    <p>只有真正新出现的内容才传像素：纯色块十几字节；照片类最贵（照片墙一屏 3.3MB → 可逆变换 2.3MB → 无损 WebP 1.6MB）。</p>
+  </div>
+</div>
+<div class="note ok">每一步都可验证：编码器只发"已验证等于目标画面"的动作，所以任何组合都不会产出错误像素。</div>
+
+<h2>3 · 模块贡献（下行字节与耗时）</h2>
+<table>
+  <thead><tr><th>模块</th><th>作用</th><th class="num">关掉后字节</th><th class="num">编码耗时</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr><td>整行搬移 COPY</td><td>滚动</td><td class="num">+20.4%</td><td class="num">同量级</td><td>多轮投票，最多 3 个不同位移</td></tr>
+    <tr><td>精灵池（登记/贴回）</td><td>滚走又滚回来的内容</td><td class="num">+15.7%</td><td class="num">≈0</td><td>条带 id = 内容哈希</td></tr>
+    <tr><td>滚动画布（内容坐标）</td><td>精确找回滚动内容</td><td class="num">−0.2%</td><td class="num">≈0</td><td>最复杂、收益最小的一块</td></tr>
+    <tr><td>边缘带搬移</td><td>滚动条滑块</td><td class="num">0.0%</td><td class="num">≈0</td><td>滑块淡入淡出时搬不动</td></tr>
+    <tr><td>字面量（zstd）</td><td>剩余脏矩形</td><td class="num">主体 97.5%</td><td class="num">5.5ms/116KB（B 手机）</td><td>照片类最弱</td></tr>
+    <tr><td>字面量可逆变换</td><td>照片类：通道去相关 + 行差分</td><td class="num">−30%（照片帧）</td><td class="num">+1 遍内存</td><td>只对"像图片"的矩形用</td></tr>
+    <tr><td>字面量无损 WebP</td><td>照片类：换编码器</td><td class="num">−50%（照片帧）</td><td class="num">467–1099ms/整屏</td><td><b>实时不可用</b>：一屏照片要半秒到一秒</td></tr>
+    <tr><td>tile 地图（内容坐标）</td><td>滚动 = 只换原点</td><td class="num">滚动帧 ≈0 字节</td><td class="num">≈0</td><td>两端共享同一张地图；长截图 = 地图导出</td></tr>
+  </tbody>
+</table>
+<p class="lead" style="font-size:14px">口径：语料 <span class="mono">~/corpus/razr-20261117</span>（11 个 App / 786 帧 / 1080×2640 / 设备 PNG 240.1MB），
+逐个关特性后重跑编码器对比总下行字节；耗时为 B 手机（MT6899）与本机（PC）实测。</p>
+
+<h2>3b · tile 地图：把画面当无限画布</h2>
+<div class="grid">
+  <div class="card"><h3>屏幕行 ↔ 内容行</h3><p>每一帧带一个<b>内容原点</b>：屏幕第 0 行 = 内容第几行（可负）。滚动 = 原点变，tile 不动。</p></div>
+  <div class="card"><h3>tile = 内容哈希</h3><p>同一段内容在两端算出同一个 id → 自动去重。滚回来的内容直接命中，不用重发像素。</p></div>
+  <div class="card"><h3>长截图 = 地图导出</h3><p>A 端把内容空间里的 tile 拼成一张图（PNG）+ 一份 JSON（每段是条带还是字面量）——就是 tile 地图的内部状态。</p></div>
+</div>
+<p class="lead" style="font-size:14px">验收：滚完 60 行后，A 端导出的长截图<b>逐像素等于原始页面</b>（<span class="mono">cargo test -p hj-codec --test tile</span>）。</p>
+
+<h2>4 · 延迟分段</h2>
+<table>
+  <thead><tr><th>环节</th><th class="num">典型值</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>输入注入 + 应用渲染 + 抓屏读回</td><td class="num">~45ms</td><td>两个 vsync + 抓屏；未在 B 原生实现上量过</td></tr>
+    <tr><td>B：整帧比较 + 哈希</td><td class="num">2.2ms</td><td>11.4MB RGBA（1080×2640×4），B 手机实测</td></tr>
+    <tr><td>B：编码（zstd-3）</td><td class="num">0.5–24ms</td><td>随字面量大小；WebP 无损 4–581ms</td></tr>
+    <tr><td>网络</td><td class="num">字节×8/带宽 + RTT/2</td><td>Tailscale 走 DERP 时会明显变差</td></tr>
+    <tr><td>A：解码</td><td class="num">PC 3ms / 手机 17–84ms</td><td>与字面量字节线性相关</td></tr>
+    <tr><td>A：贴脏矩形</td><td class="num">≈0</td><td>只贴变化矩形，不全屏</td></tr>
+  </tbody>
+</table>
+<div class="note">字节数就是延迟：A 端解码时间随字面量字节线性增长，传输时间同理。<b>省字节的杠杆同时是省延迟的杠杆。</b></div>
+
+<h2>5 · 协议骨架</h2>
+<table>
+  <thead><tr><th>层</th><th>东西</th><th>要点</th></tr></thead>
+  <tbody>
+    <tr><td>线格式</td><td>长度前缀 + postcard</td><td>快但不自描述 ⇒ 枚举只追加、字段不改序、不兼容升版本</td></tr>
+    <tr><td>通道</td><td><span class="mono">ctl</span> / <span class="mono">up</span> / <span class="mono">frames</span> / <span class="mono">video</span></td><td>按频率与方向分流，互不阻塞；视频区未实现</td></tr>
+    <tr><td>消息</td><td>枚举即 schema</td><td>同一批类型再导出 JSON 给调试与桥接</td></tr>
+    <tr><td>帧</td><td><span class="mono">fid u32 + flags u8 + 操作流</span></td><td>层间原子提交，不撕裂</td></tr>
+    <tr><td>热路径</td><td>触摸移动 20B / 4 合批 65B / Tap 15B / Shown 9B</td><td>合批比单发划算（QUIC/UDP/IP 头约 40B）</td></tr>
+  </tbody>
+</table>
+
+<h2>6 · 相关开源项目</h2>
+<div class="grid">
+  <div class="card"><h3>Xpra</h3><p>最值得读：按窗口/区域自动选编码（无损/webp/jpeg/视频），滚动检测，文字与图片分解，图片有损后补到无损。</p></div>
+  <div class="card"><h3>VNC Tight / CopyRect</h3><p>矩形分类（纯色/调色板/JPEG）；CopyRect 是滚动最便宜的表达——我们的整行搬移就是它的加强版。</p></div>
+  <div class="card"><h3>MRC (T.44) / DjVu</h3><p>前景/背景/掩码三层混成："布局与图片独立质量"的理论原型，对应我们的布局层/精灵层。</p></div>
+  <div class="card"><h3>JPEG XL patches</h3><p>在图像格式内部做重复字形/图标去重——"字形精灵"是同一思路，只是我们还没实现。</p></div>
+  <div class="card"><h3>scrcpy</h3><p>交互与传输的工程参照：虚拟显示、输入注入、背压、按通道分流。</p></div>
+</div>
+
+<h2>6b · 真机数据（razr 40，mm1 构建）</h2>
+<table>
+  <thead><tr><th>场景</th><th class="num">输入→首帧 p50</th><th class="num">p90</th><th class="num">每帧字节 p50</th><th class="num">p90</th></tr></thead>
+  <tbody>
+    <tr><td>连续滚轮</td><td class="num">13–22ms</td><td class="num">37–89ms</td><td class="num">4.5KB</td><td class="num">7.8KB</td></tr>
+    <tr><td>甩动（惯性）</td><td class="num">26.3ms</td><td class="num">46.8ms</td><td class="num">4.8KB</td><td class="num">8.7KB</td></tr>
+    <tr><td>离散滚动手势</td><td class="num">70.6ms</td><td class="num">84.6ms</td><td class="num">4.1KB</td><td class="num">9.7KB</td></tr>
+  </tbody>
+</table>
+<p class="lead" style="font-size:14px">p90 ≤120ms 达标；稳态每帧 ≤10KB。分段里 <b>ImageReader 回调（App 响应+合成）占 5.7–62ms，是主导项</b>，我们的管线只占约 3ms（B 编码 2.8 + A 解码 1.0 + 抓帧 1.0）。逐帧 0px 校验 901/0。</p>
+
+<h2>7 · 四个容易被误解的点</h2>
+<ul>
+  <li><b>"有损精灵 + 升级"还没做</b>：池里存的是原样的行，只有"见过再回来"才省；照片类内容的大头还在字面量里。</li>
+  <li><b>无损 WebP 小一半但实时不可用</b>：B 端编码一屏照片 0.5–1.1 秒（zstd 只要 30ms）→ 省照片字节只能靠"有损快档 → 升级"。</li>
+  <li><b>视频层没有</b>：协议留了通道，没有任何实现。</li>
+  <li><b>A11y 不在数据面上</b>：协议 v2 已删；运行时从来没用过它，像素判定已能保证 0px。</li>
+  <li><b>协议 v3 砍掉了整个合成层调试</b>：只剩只读层列表；长截图改成从 A 端 tile 地图导出。</li>
+  <li><b>换页时内容坐标会重置</b>：所以帧头带 <code>epoch</code>（内容空间代号），A 端据此清地图——否则两套坐标系混排，长截图错位。</li>
+  <li><b>≤30KB/帧对整屏照片不成立</b>：照片级内容（壁纸、插画）无损就是 2.3MB；能做的是"先有损、静止后升级"（省首帧时间，不省总字节）。</li>
+</ul>
+
+<h2>8 · 几处必须记住的坑</h2>
+<ul>
+  <li><span class="mono">pgrep -f</span> 的模式若出现在自己命令行里会匹配到自己 → 后台任务永不退出。</li>
+  <li>Android 任意线程未捕获异常会 kill -9 整个进程 → daemon 自装 UncaughtExceptionHandler。</li>
+  <li>Kotlin 命令泵不能睡：一睡，后面的触摸/按键全排队。</li>
+  <li>整帧哈希 = 行哈希的折叠，不是 hash64(整帧) → 两端定义必须一致。</li>
+  <li>Android 12+ 拉伸式越界回弹不是刚性平移 → COPY 不命中，退化成整屏字面量。</li>
+  <li>控制端口只绑 Tailscale 网卡，不得 0.0.0.0；自签证书 ≤14 天要轮换。</li>
+</ul>
+
+<p class="lead" style="margin-top:40px">细节与数字见 <span class="mono">mm1/doc/</span>：10-codec-modules（模块贡献表）、20-recognition（识别与判定）、30-protocol（协议）、40-pitfalls（易错点）。</p>
+
+</div>
+</body>
+</html>
