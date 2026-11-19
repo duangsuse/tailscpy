@@ -1,107 +1,117 @@
-# 活镜投屏 · 算法开发计划
+# 活镜投屏 · 开发计划
 
-## 1. 架构
+> IDEA.md 是金标准。本文是总览和入口，展开内容在 `doc/`；两者冲突以 IDEA 为准。
+> 执行者从 [doc/90-tasks.md](doc/90-tasks.md) 开始，按顺序做。
 
-| 模块 | 语言 | 职责 |
+A = 浏览器（或手机浏览器）里的查看端；B = 被控的 Android 设备。
+A→B：白名单开 / 点 / 滑 / 返。B→A：单画布画面。
+
+## 1. 用户能看到什么
+
+| # | 需求 | 展开 |
 |---|---|---|
-| host-adb | Kotlin (app_process) | 虚拟屏和 ImageReader、UiAutomation(A11y)、输入注入、全局设置开关与还原、剪贴板 |
-| rd | Rust（JNI + WASM 同一 crate） | wire enum、行哈希/位移投票、分类、Palette/IBC/精灵/残差编解码、页面地图状态机 |
-| host-net | Rust | WebTransport 服务端 |
-| viewer | TS + WASM | 三层合成、本地滚动、持久缓存（OPFS）、调试 UI |
+| U1 | 浏览器打开 localhost 页面，右上角选白名单 App，进入单应用会话；没有状态栏、通知、HOME | 60、70 |
+| U2 | 文字和 symbolic 图标逐像素锐利；图片有损，质量可调 | 40 |
+| U3 | 左键点按 / 长按 / 拖动，键盘按键，Ctrl+C / Ctrl+V | 70、60 |
+| U4 | 滚轮、拖动、滚动条都在本地立即响应；见过的内容来回滚不产生下行流量；匀速滚动看不到空白 | 30 |
+| U5 | 右键 / Esc / 浏览器后退 = 返回，上一页立即出现 | 20、70 |
+| U6 | 刷新页面、断线重连、隔天再开，去过的页面不重新下载 | 20、50 |
+| U7 | l 键：三层比重、可调项、省流百分比；r 键：最近刷新矩形 / 图文视三类区遮罩；可导出长截屏 | 70、40 |
+| U8 | 退出或崩溃后，B 的动画和模糊设置被还原；B 可以熄屏 | 60 |
+| U9 | 以上在 300–800 KB/s 的 Tailscale 链路上成立 | 50、80 |
 
-编解码两侧用同一份 Rust，保证 bg/lit 层逐像素一致。每条补丁带校验 hash，调试模式下 A 端做断言。
+## 2. 数据流
 
-传输分流：
-- 控制/输入、可见区补丁、prefetch 补丁走三条独立可靠流，用 `sendOrder` 保证可见区优先。
-- prefetch 写入前检查可见队列为空，可被抢占。
-
-## 2. 协议草案（Rust enum）
-
-```rust
-enum Up {            // A→B
-  Hello{cache_rev, pages: Vec<(PageId, PgRev)>},
-  Open{pkg}, Tap{page_xy}, ScrollTo{region, x, y, v_px_s}, Back, Key, Clip,
-  Ack{seq, drawable_ts},          // 用于 P95 "可绘制耗时"统计
-  Tune{key, val},
-}
-enum Down {          // B→A
-  Page{id, rev, skeleton_meta, regions: Vec<ScrollRegion>, stack_op: Push|Pop|Replace},
-  Region{id, rect, content_wh, offset_xy, at_top, at_bottom, bottom_bar: Option<Rect>},
-  Tile{region, content_y, h, layer: Bg|Lit|Fg, body: Enc},   // 写入地图
-  Overlay{rect, ttl_ms, body: Enc},      // :active/滚动条/spinner，不落底图
-  Copy{src: (page, region, y) | SpriteId | PrevFrame(dx,dy), dst_rect},
-  Dim{rect, color, alpha},  Shift{rect, dx, dy},             // 块运动补漏
-  Sprite{id_hash, body},    Invalidate{page, range},
-}
-enum Enc { Solid, Palette{..}, Residual{filter, zstd}, Lossy{codec,q}, Raw }
+```mermaid
+flowchart LR
+  subgraph B["B：Android，shell 权限"]
+    VD[虚拟屏] --> CAP[采集帧]
+    A11Y[A11y 树与事件] --> REC
+    CAP --> REC[识别：行 hash / 位移 / 区域]
+    REC --> ENC[编码：只编 A 缺的]
+    HS[(每页行 hash = A 已有什么)] <--> ENC
+    SCH[采集头调度] --> INJ[输入注入]
+    INJ --> VD
+  end
+  subgraph A["A：浏览器，WASM"]
+    DEC[解码事务] --> MAP[(页面画布 + 精灵池)]
+    MAP --> COMP[单画布合成]
+    UI[输入 / 本地滚动] --> COMP
+    MAP <--> OPFS[(OPFS)]
+  end
+  ENC -- "tx：一条有序流，可见区先发，预取空闲时发" --> DEC
+  UI -- "up：视口位置 / 确认" --> SCH
+  UI -- "up：点按 / 按键 / 返回" --> INJ
 ```
 
-## 3. 核心算法
+## 3. 六条规则
 
-**3.1 位移检测（行哈希投票）**
-- 只在 A11y 滚动区内算，并裁掉右缘滚动条列。
-- 每行算 64 位 hash，权重取该行颜色游程数，纯色行权重为 0。
-- 对 prev 和 cur 的匹配行做 dy 直方图。峰值需过阈值且唯一，再做逐行验证。
-- 结果与 A11y `scrollDeltaY` 累计值交叉校验。两者不一致时以像素为准，并标记该页"地图不精确"。
-- 投票失败时退化为折叠行 hash（每 8/16 行）查全局字典的 IBC。
+1. **像素为真，A11y 只提案。** A11y 给出的滚动区、图片框、页面身份，都要过一次像素检验才生效。A11y 晚到或出错，只损失省流，不出错图，也不挡出图。
+2. **B 编码的是“最新一帧”对“A 已有的内容”，不是对上一帧。** 所以中间帧可以随便丢，A 的视口也不必等于 B 的屏幕。
+3. **A 的视口和 B 的采集头是两回事。** 用户滚动只动视口；采集头由调度器决定，负责把画布填上。
+4. **进画布的内容必须稳定。** 按下高亮、光标、转圈这类短暂变化走 Overlay，不改底图。
+5. **B 对“A 有什么”的认识只有两个来源。** 同一连接内：发出去的就算（画面数据是一条有序流，A 按序应用）。跨连接：只认 A 报告的已落盘版本。
+6. **先有录制和 bench，再调启发式。** 参数都进参数表，可按全局 / App / 页面覆盖，不写死。
 
-**3.2 页面地图**
-- 页面 = 骨架 hash（包名 + 窗口 + resource-id 树结构，剔除列表 item 子树）。
-- 每个滚动区是一条按内容坐标寻址的长条，带分段行 hash。
-- B 只持久化 hash，A 持久化像素。握手时对齐 `cache_rev` 和 pg_rev，不一致就整页重置。
-- item 高度变化或中间插入导致错位时，`Invalidate` 该段之后的内容并退回 IBC。
-- 重进页面时滚动位置不同：用首屏行 hash 在地图里重定位。
+## 4. 模块与目录
 
-**3.3 短变更不污染底图**
-- 触摸按下后 N ms 内的变化，以及自动恢复为原 hash 的变化，走 `Overlay`。
-- 变化稳定超过阈值才提交为 `Tile`。
-- 滚动条同样走 Overlay 或直接丢弃，A 端按 Region 信息自绘。
-
-**3.4 三层分类**
-- 按块统计色数、梯度，并用 A11y ImageView 边界做先验：
-  - 少色块 → bg，Palette 无损。
-  - 小连通域且重复 → lit，精灵池，按连通域 hash。先做图标/按钮级，字形级在 M5 评估收益后再定。
-  - 像图片的块 → fg，有损，质量可调，矩形对齐到 A11y 边界。
-- 剩余脏矩形用预测滤波（Paeth 类）+ zstd 长窗口，上一帧同位置作字典。
-
-**3.5 客户端滚动**
-- 废除 fling。A 收到滚轮/拖动/滚动条拖拽后，本地立即合成，并发 `ScrollTo`。
-- B 用末速度为零的拖动注入来移动"采集头"，补偿 touch slop。
-- B 的真实滚动位置与 A 的视口解耦。
-- 点击时把页面坐标换算回当前屏坐标，必要时先滚到位。
-
-**3.6 超高虚拟屏和 prefetch**
-- 启用条件：单滚动区页面，且有 100vw 底栏或滚动区贴屏底。
-- 虚拟屏加高后，A 合成 = 顶栏 + 滚动窗口 + 底栏贴回。
-- 超出加高范围时，空闲期由采集头前移。
-- 提前量 = 滚速 × (P95 可绘制耗时 + 余量)，耗时由 `Ack.drawable_ts` 按 App 统计。
-- `at_bottom` 时停止 prefetch。
-
-**3.7 块运动补漏**
-- DIM：检测 cur ≈ prev×k + c，发 `Dim`。
-- 整列平移：发 `Shift`。
-- spinner：周期帧进精灵池，循环用 `Copy`。
-
-## 4. 里程碑
-
-| 阶段 | 内容 | 验收 |
+| 目录 | 语言 | 职责 |
 |---|---|---|
-| M0 可行性 | shell 下虚拟屏 + A11y；虚拟屏 resize 代价；WebTransport 打通；**录制语料 + 离线回放码率评测台** | 后续每个算法都能离线出"省流%" |
-| M1 基线 | 脏矩形 + Palette/zstd、输入、白名单、动画/模糊开关与还原、r 键遮罩 | 静态页 0 字节，逐像素一致 |
-| M2 滚动 | 行哈希投票、地图、viewer 合成、废 fling、滚动条转换 | 设置 App 回滚 0 像素字节 |
-| M3 页面缓存 | 骨架 hash、pg_rev 差异、返回栈整屏贴回、Overlay 机制、OPFS 持久化 | 返回上一页本地出图，重连后不重传 |
-| M4 prefetch | 超高屏、底栏合成、提前量控制、流优先级 | 匀速滚动无白块率达标 |
-| M5 压缩深化 | 精灵池、全局 IBC、图片层有损、Dim/Shift/spinner、l 面板省流统计 | 对比 M1 的码率下降 |
-| M6 收尾 | 横向 tab/Drawer、fg 视频层（MediaCodec → WebCodecs） | — |
+| `host-adb/` | Kotlin（app_process） | 虚拟屏、采集、A11y、注入、全局设置开关与还原、白名单、剪贴板、录制 |
+| `rd/` | Rust，一个 crate 编成 Android .so 和 WASM | wire 枚举、识别、编解码、页面状态机。两端和 bench 共用 |
+| `host-net/` | Rust（和 rd 链进同一个 .so） | WebTransport 服务端 |
+| `viewer/` | TS + rd.wasm | 合成、输入、OPFS、调试面板 |
+| `bench/` | Rust（复用 rd） | 离线重放、报表、消融 |
+| `e2e/` | JS | 场景脚本与 runner（`corpus/appi.js` 的精简重写） |
+| `doc/` | — | 展开文档 |
 
-面板的省流百分比用"影子编码"算：同一区域按字面量编码的字节数对比实际发送字节数，按精灵/滚动/长截屏分项。
+## 5. 文档
 
-## 5. 主要风险（M0 必须验证）
+| 文件 | 回答什么 |
+|---|---|
+| [10-dataflow](doc/10-dataflow.md) | 一帧、一次点击、一次滚动各走哪几步；状态归谁；断了怎么恢复 |
+| [20-pages](doc/20-pages.md) | 页面 / 区域 / 画布 / 精灵 / Overlay；换页判定；返回栈；持久化与 `cache_rev` / `pg_rev` |
+| [30-scroll](doc/30-scroll.md) | 本地滚动、采集头、超高虚拟屏、预取、点击换算、滚动条、横向 tab |
+| [40-codec](doc/40-codec.md) | 行 hash、位移、缺什么发什么、Palette / 行引用（IBC）/ 精灵 / 有损图片、三层统计 |
+| [50-protocol](doc/50-protocol.md) | 流、消息骨架、握手与缓存对齐、传输设置、参数表 |
+| [60-host](doc/60-host.md) | B 端启动顺序、虚拟屏、A11y、注入、设置还原、白名单、平台探针 |
+| [70-viewer](doc/70-viewer.md) | 输入映射、合成顺序、history、l / r 调试面、OPFS |
+| [80-corpus-bench](doc/80-corpus-bench.md) | 现有语料的结构建议、录制格式、场景、bench、与 scrcpy 对比、消融 |
+| [90-tasks](doc/90-tasks.md) | 给执行者的任务顺序，每项带“怎么确认” |
 
-1. **安全上下文**：WebTransport 和剪贴板 API 都要求 HTTPS 或 localhost，直接开 `http://100.x.x.x` 不可用。可选方案是页面托管在 HTTPS 静态站或 A 端 localhost，再用 `serverCertificateHashes` 连自签证书（ECDSA，有效期 ≤14 天，需自动轮换）。
-2. **虚拟屏 resize**：会触发配置变更，部分 App 会重建 Activity 或丢滚动位置。备选是"进入 App 时定高，不逐页切换"。
-3. **超高屏副作用**：显存和纹理高度有上限，建议 ≤3~4 倍屏高。App 会多加载数据和曝光埋点。居中弹窗位置会偏，所以要限定单滚动区页面。
-4. **UiAutomation**：虚拟屏上的窗口需要 API 30+ 的多 display 接口。默认会压制其他无障碍服务，需设不压制 flag。
-5. **RecyclerView 无绝对偏移**：只有 delta，累计会漂移，所以地图坐标必须以像素投票为准。
-6. **设置还原**：原值先落盘到 `/data/local/tmp`，kill -9 后下次启动可补还原。
-7. **Tailscale MTU 1280 和 DERP 中继**：P95 抖动大，余量参数要自适应。
+## 6. 里程碑
+
+| 阶段 | 做什么 | 做完后能看到 |
+|---|---|---|
+| M0 工具链 | host 最小闭环、平台探针、录制器、场景脚本、bench 骨架、README oneliner | 一条命令录一段设置 App 的操作，一条命令出字节 / 耗时 / 峰值报表 |
+| M1 能看能点 | WebTransport、基线编码（对 A 的状态求差 + Palette / zstd）、输入、选包、设置开关与还原、r 遮罩 | 浏览器里操作设置 App：能点、能打字、能返回；文字锐利；画面静止时下行为零 |
+| M2 本地滚动 | 页面与区域、画布、位移、采集头、本地合成、点击换算与点前校验、滚动条 | 滚到底再滚回来，回程零像素流量；滚动后点击命中正确条目 |
+| M3 页面缓存 | Overlay、返回栈、乐观返回、模态页、OPFS、版本对齐、断线重连 | 返回上一页立即出现；刷新浏览器后重进去过的页面不下载像素 |
+| M4 预取 | 预取调度与发送纪律、提前量、超高虚拟屏 | 匀速滚动长列表看不到占位块；预取不拖慢点击后的画面更新 |
+| M5 压缩 | 有损图片、无损精灵池、行引用、消融报告、l 面板省流分项 | 图片多的 App 首屏流量明显下降，文字仍锐利；面板显示各项省了多少 |
+| M6 收尾 | 横向 tab / Drawer、fg 视频区、编辑器场景 | NewPipe 切 tab、qpython 编辑器可用 |
+
+M2 之后每个阶段都要在 bench 上留一份报表，和上一阶段比。
+
+## 7. 需要你拍板（已按默认写进文档）
+
+| # | 问题 | 默认 |
+|---|---|---|
+| 1 | 三层怎么分 | bg = 无损布局（文字、symbolic 图标）；lit 精灵池 = 无损小图（返回键、开关）+ 有损图片；fg 只放视频区，最后做 |
+| 2 | 录制怎么驱动 | `appi.js` 重写后不经过 Appium server，直接驱动 host。原因：UiAutomation 同一时刻只能有一个持有者，Appium 和 host 不能并存；而且要在虚拟屏上、带时间戳地录 |
+| 3 | 白名单 App 拉起别的包（设置 → 搜索 / OTA，新闻 → Chrome，权限框） | 拦截并返回。要放行就得给每个 App 列伴生包 |
+| 4 | 超高屏的代价 | 从加高的列表页点进非列表页或弹窗时，要先缩回 1× 才能出图，这类切换会多等一次 resize。按 App 可关 |
+| 5 | URL 里放什么 | 证书 hash 和一个随机 token 都放（证书 hash 任何连得上端口的设备都能算出来，不能单独当口令） |
+| 6 | 手机当 A 时 localhost 页面由谁提供 | 未定，先只保证桌面浏览器 |
+
+## 8. 相对旧版 GOAL 改了什么
+
+- 编码基准从“B 的上一帧”改为“A 已有的内容”。视口解耦之后这是必须的，也让丢帧和背压变得简单。
+- 画面数据只走一条有序流。“可见区优先”由 B 在发送前保证：预取只在空闲时发、在途量有上限、有输入就停。旧版的三条流 + `sendOrder` 做不到这一点（`sendOrder` 管不到下行，多条流之间还会乱序写同一张画布）。
+- 采集头用鼠标滚轮注入：位移确定、没有惯性、边缘不回弹。分步拖动降为回退。每个 App 是否可用由探针决定。
+- 新增点前校验：注入点击前比对该条目的行 hash，缓存过期就不点。这是“默认静态”的安全阀。
+- A11y 晚到时先发一个临时页让用户看到，树到了再转成正式页，像素不重发。
+- 弹窗 = 浮在上一页上的模态页 + 一个压暗颜色；去掉了 `Dim` / `Shift` / `Invalidate` 专用消息（`Copy` 带 x、y 偏移即可）。
+- 超高虚拟屏写成状态机，列出进入、退出条件和按 App 的开关；A 完全不知道它的存在。
+- 缓存对齐写清了“断线时有数据在路上”“A 刷新时没来得及写盘”两种情况怎么回退。
+- 语料改为带时间戳的连续录制 + 按意图命名的确定性场景；M0 里每个平台探针都写明不通过时的回退。
