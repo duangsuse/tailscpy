@@ -99,6 +99,7 @@ pub extern "system" fn Java_hj_Native_hints(mut env: JNIEnv, _c: JClass, json: J
     let Some(c) = core() else { return };
     let Ok(v) = serde_json::from_str::<Vec<[u32; 4]>>(&j) else { return };
     if let Some(e) = c.enc.lock().unwrap().as_mut() { e.set_hints(v.into_iter().map(|r| Rect { x: r[0], y: r[1], w: r[2], h: r[3] }).collect()) }
+    c.kick();   // 提案晚到：已按无损发出的照片要改发 JPEG，压后的条带也可以放行了
 }
 
 #[no_mangle]

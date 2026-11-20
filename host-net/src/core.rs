@@ -178,13 +178,14 @@ pub fn encoder_loop(core: Arc<Core>) {
         // 3. 编
         let p = core.params.lock().unwrap().clone();
         let t = Instant::now();
-        let (ops, rows) = {
+        let (ops, rows, defer) = {
             let mut g = core.enc.lock().unwrap();
             let Some(enc) = g.as_mut() else { continue };
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
-            let o = enc.encode(&p); (o.ops, o.rows)
+            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer)
         };
-        if ops.is_empty() { continue }
+        let more = defer;
+        if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } continue }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         // 4. 统计（逐 Op 的线上字节）
         let mut layers = [0u64; 3]; let mut kinds: Vec<(&'static str, u64)> = vec![];
@@ -203,5 +204,6 @@ pub fn encoder_loop(core: Arc<Core>) {
             for (k, b) in kinds { match s.by_kind.iter_mut().find(|x| x.0 == k) { Some(x) => x.1 += b, None => s.by_kind.push((k.to_string(), b)) } }
             s.frames += 1; s.rows_sent += rows as u64; s.enc_ms_last = ms; s.enc_ms_total += ms; s.tx_bytes += n; s.tx_msgs += 1;
         }
+        if more { std::thread::sleep(Duration::from_millis(50)); core.kick() }   // 有压后的条带：过一会儿再编（等 A11y 提案）
     }
 }

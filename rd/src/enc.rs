@@ -28,17 +28,17 @@ pub struct Encoder {
     mask: Mask,
     mask_sb: u32,
     hints: Vec<Rect>,
+    defer_since: Option<u64>,
 }
 
-pub struct Out { pub ops: Vec<Op>, pub rows: u32 }
-
-fn rect_of(d: &Dst) -> Rect { Rect { x: d.x, y: d.y, w: d.w, h: d.h } }
+/// `defer`：有“像素上像照片、但 A11y 还没确认”的条带被压后了（图片先别当无损发），调用方过一会儿要再编一次
+pub struct Out { pub ops: Vec<Op>, pub rows: u32, pub defer: bool }
 
 impl Encoder {
     pub fn new(w: usize, h: usize) -> Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], stale: vec![true; h],
-            a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], mask: Mask::full(w as u32), mask_sb: 0, hints: vec![],
+            a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], mask: Mask::full(w as u32), mask_sb: 0, hints: vec![], defer_since: None,
         }
     }
 
@@ -112,9 +112,12 @@ impl Encoder {
         out
     }
 
-    fn lit_rect(&self, x: usize, y: usize, w: usize, h: usize, level: i32) -> Op {
+    /// `defer_photo`：颜色多得放弃直方图（像照片）的条带返回 None，由调用方压后
+    fn lit_rect(&self, x: usize, y: usize, w: usize, h: usize, level: i32, defer_photo: bool) -> Option<Op> {
         let rb = self.w * 4; let dst = Dst { region: 0, x: x as u32, y: y as u32, w: w as u32, h: h as u32 };
-        match le::histogram(&self.cur, rb, x, y, w, h, 4096) {
+        let hist = le::histogram(&self.cur, rb, x, y, w, h, 4096);
+        if hist.is_none() && defer_photo { return None }
+        Some(match hist {
             Some(m) if m.len() == 1 => { let c = *m.keys().next().unwrap(); Op::Fill { dst, color: [(c >> 16) as u8, (c >> 8) as u8, c as u8, 255] } }
             Some(m) if m.len() <= 256 => {
                 let raw = le::palette_raw(&self.cur, rb, x, y, w, h, &m, 1.0).expect("palette");
@@ -129,17 +132,22 @@ impl Encoder {
                 }
             }
             None => Op::Lit { dst, enc: LitEnc::Residual, dict: None, data: le::zstd_encode(&le::residual_raw(&self.cur, rb, x, y, w, h), level) },
-        }
+        })
+    }
+
+    /// 这个矩形里 A 现在是不是全是无损内容（没有有损像素，且已经写过）：晚到的 A11y 图片提案据此决定要不要改发 JPEG
+    fn rect_lossless_known(&self, r: &Rect) -> bool {
+        (r.y..r.y + r.h).all(|y| { let o = y as usize * self.w + r.x as usize; self.layer[o..o + r.w as usize].iter().all(|&l| l == LAYER_BG) })
     }
 
     /// 编一帧：返回要发的 Op（没有缺的就是空）。同时把这些 Op 记入 A 的状态。
-    pub fn encode(&mut self, p: &Params) -> Out {
+    pub fn encode(&mut self, p: &Params, now_ms: u64) -> Out {
         self.sync_mask(p.get("sb_w") as u32);
         let (w, h, rb) = (self.w, self.h, self.w * 4);
         let level = p.get("zstd_level") as i32; let strip = (p.get("strip_rows") as usize).max(1);
         for y in 0..h { if self.stale[y] { self.cur_hash[y] = row_hash_masked(&self.cur[y * rb..(y + 1) * rb], &self.mask); self.stale[y] = false } }
         let missing: Vec<bool> = (0..h).map(|y| !self.a_valid[y] || self.a_hash[y] != self.cur_hash[y]).collect();
-        if !missing.iter().any(|&m| m) { return Out { ops: vec![], rows: 0 } }
+        let any_missing = missing.iter().any(|&m| m);
 
         // 连续缺行 → 横带，逐列比对定左右界
         let mut bands: Vec<(usize, usize, usize, usize)> = vec![];   // y0, y1, x0, x1
@@ -166,12 +174,19 @@ impl Encoder {
             for hnt in self.hints.clone() {
                 let r = Rect { x: hnt.x.min(w as u32), y: hnt.y.min(h as u32), w: hnt.w.min((w as u32).saturating_sub(hnt.x)), h: hnt.h.min((h as u32).saturating_sub(hnt.y)) };
                 if r.w == 0 || r.h == 0 || r.w * r.h < p.get("img_min_area") as u32 { continue }
-                if !bands.iter().any(|b| (b.0 as u32) < r.y + r.h && (b.1 as u32) > r.y) { continue }
-                if !self.rect_differs(&r) || !self.is_photo(&r, p) { continue }
+                let hit = bands.iter().any(|b| (b.0 as u32) < r.y + r.h && (b.1 as u32) > r.y) && self.rect_differs(&r);
+                // A11y 晚到：这块已经按无损发过了，确认是照片就改发 JPEG（只损失省流，不出错图，50/60 规则 1）
+                let late = !hit && self.rect_lossless_known(&r);
+                if !(hit || late) || !self.is_photo(&r, p) { continue }
                 if !images.iter().any(|i| i.x < r.x + r.w && r.x < i.x + i.w && i.y < r.y + r.h && r.y < i.y + i.h) { images.push(r) }
             }
         }
 
+        if bands.is_empty() && images.is_empty() { return Out { ops: vec![], rows: 0, defer: false } }
+        let _ = any_missing;
+        let defer_ms = p.get("img_defer_ms") as u64;
+        let defer_on = p.get("img_lossy") > 0.5 && defer_ms > 0 && now_ms.saturating_sub(*self.defer_since.get_or_insert(now_ms)) < defer_ms;
+        let mut deferred = vec![false; h];
         let mut ops: Vec<Op> = vec![];
         for &(y0, y1, x0, x1) in &bands {
             let mut cuts = vec![y0, y1];
@@ -186,7 +201,9 @@ impl Encoder {
                 for (a, b) in cover { if a > xs { free.push((xs, a.min(x1))) } xs = xs.max(b) }
                 if xs < x1 { free.push((xs, x1)) }
                 for (a, b) in free { if a >= b { continue }
-                    let mut yy = s0; while yy < s1 { let hh = strip.min(s1 - yy); ops.push(self.lit_rect(a, yy, b - a, hh, level)); yy += hh }
+                    let mut yy = s0; while yy < s1 { let hh = strip.min(s1 - yy);
+                        match self.lit_rect(a, yy, b - a, hh, level, defer_on) { Some(op) => ops.push(op), None => for r in yy..yy + hh { deferred[r] = true } }
+                        yy += hh }
                 }
             }
         }
@@ -195,6 +212,7 @@ impl Encoder {
         // 记入 A 的状态
         let mut rows = 0u32;
         for &(y0, y1, _, _) in &bands { for yy in y0..y1 {
+            if deferred[yy] { continue }   // 压后的行保持“缺”，下次再编
             self.shadow[yy * rb..(yy + 1) * rb].copy_from_slice(&self.cur[yy * rb..(yy + 1) * rb]);
             self.a_hash[yy] = self.cur_hash[yy]; self.a_valid[yy] = true; rows += 1;
         } }
@@ -204,7 +222,7 @@ impl Encoder {
         // 校验：只覆盖本帧写过、且不含有损像素的连续行
         if p.get("verify") > 0.5 {
             let full = Mask::full(w as u32); let mut touched = vec![false; h];
-            for &(y0, y1, _, _) in &bands { for yy in y0..y1 { touched[yy] = true } }
+            for &(y0, y1, _, _) in &bands { for yy in y0..y1 { touched[yy] = !deferred[yy] } }
             let clean = |yy: usize| touched[yy] && self.layer[yy * w..(yy + 1) * w].iter().all(|&l| l != LAYER_LIT);
             let mut yy = 0;
             while yy < h {
@@ -214,8 +232,9 @@ impl Encoder {
                 ops.push(Op::Verify { region: 0, y0: s as u32, y1: yy as u32, fold: fold(&hs) });
             }
         }
-        let _ = rect_of;
-        Out { ops, rows }
+        let defer = deferred.iter().any(|&d| d);
+        if !defer { self.defer_since = None }
+        Out { ops, rows, defer }
     }
 }
 
@@ -253,7 +272,7 @@ mod tests {
     }
     fn run(enc: &mut Encoder, cv: &mut Canvas, p: &Params, frame: &[u8]) -> Out {
         enc.push_frame(frame, W * 4);
-        let out = enc.encode(p);
+        let out = enc.encode(p, 0);
         let ap = cv.apply(&out.ops).unwrap();
         assert!(ap.verify_fail.is_empty(), "校验失败 {:?}", ap.verify_fail);
         out
@@ -286,7 +305,7 @@ mod tests {
         let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
         run(&mut e, &mut c, &p, &text_frame(0));
         e.push_frame(&text_frame(1), W * 4); e.push_frame(&text_frame(2), W * 4);   // 两帧只编最后一次
-        let f3 = text_frame(3); let out = { e.push_frame(&f3, W * 4); e.encode(&p) };
+        let f3 = text_frame(3); let out = { e.push_frame(&f3, W * 4); e.encode(&p, 0) };
         c.apply(&out.ops).unwrap();
         assert!(rows_equal(&c.px, &f3, &[]));
     }
@@ -302,6 +321,38 @@ mod tests {
         assert_eq!(&data[..2], &[0xff, 0xd8]);   // JPEG SOI
         // 图片矩形内的像素这里（没有 JPEG 解码）保持占位，其余逐像素一致
         assert!(rows_equal(&c.px, &f, &[r]));
+    }
+    #[test] fn photo_without_hint_is_deferred_then_sent_lossless_after_timeout() {
+        let p = Params::new();
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let mut f = text_frame(0); let r = Rect { x: 10, y: 145, w: 96, h: 50 }; photo(&mut f, r, 1);
+        e.push_frame(&f, W * 4);
+        let o1 = e.encode(&p, 0); c.apply(&o1.ops).unwrap();
+        assert!(o1.defer, "没有 A11y 提案的照片条带先压后");
+        assert!(o1.ops.iter().all(|op| op.dst().map_or(true, |d| d.y + d.h <= 145 || d.y >= 192)), "文字部分照发，照片行不发");
+        let o2 = e.encode(&p, 10_000); c.apply(&o2.ops).unwrap();   // 超时：照片按无损发
+        assert!(!o2.defer); assert!(rows_equal(&c.px, &f, &[]));
+    }
+    #[test] fn deferred_photo_becomes_jpeg_when_hint_arrives() {
+        let p = Params::new();
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let mut f = text_frame(0); let r = Rect { x: 10, y: 145, w: 96, h: 50 }; photo(&mut f, r, 1);
+        e.push_frame(&f, W * 4); let o1 = e.encode(&p, 0); c.apply(&o1.ops).unwrap(); assert!(o1.defer);
+        e.set_hints(vec![r]);
+        let o2 = e.encode(&p, 50); c.apply(&o2.ops).unwrap();
+        assert!(o2.ops.iter().any(|op| matches!(op, Op::Image { .. })) && !o2.defer);
+        assert!(rows_equal(&c.px, &f, &[r]));
+    }
+    #[test] fn late_hint_converts_already_sent_lossless_photo_to_jpeg() {
+        let mut p = Params::new(); p.set("img_defer_ms", 0.0);
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let mut f = text_frame(0); let r = Rect { x: 10, y: 145, w: 96, h: 50 }; photo(&mut f, r, 1);
+        e.push_frame(&f, W * 4); let o1 = e.encode(&p, 0); c.apply(&o1.ops).unwrap();
+        assert!(!o1.ops.iter().any(|op| matches!(op, Op::Image { .. })));
+        e.set_hints(vec![r]);
+        let o2 = e.encode(&p, 100); c.apply(&o2.ops).unwrap();
+        assert_eq!(o2.ops.iter().filter(|op| matches!(op, Op::Image { .. })).count(), 1);
+        let o3 = e.encode(&p, 200); assert!(o3.ops.is_empty(), "只转一次，不反复重发");
     }
     #[test] fn flat_hint_is_not_trusted() {
         // A11y 说是图片，像素却是纯色 / 少色：以像素为准，走 Lit（40 §11）
@@ -329,8 +380,8 @@ mod tests {
     }
     #[test] fn deterministic_ops() {
         let p = Params::new();
-        let a = { let mut e = Encoder::new(W, H); e.push_frame(&text_frame(0), W * 4); e.encode(&p).ops };
-        let b = { let mut e = Encoder::new(W, H); e.push_frame(&text_frame(0), W * 4); e.encode(&p).ops };
+        let a = { let mut e = Encoder::new(W, H); e.push_frame(&text_frame(0), W * 4); e.encode(&p, 0).ops };
+        let b = { let mut e = Encoder::new(W, H); e.push_frame(&text_frame(0), W * 4); e.encode(&p, 0).ops };
         assert_eq!(a, b);
     }
     #[test] fn blank_detection() {

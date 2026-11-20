@@ -6,7 +6,7 @@ fn main() {
     let f = std::fs::read(&a[1]).unwrap(); let mut p = Params::new();
     for kv in &a[4..] { let (k, v) = kv.split_once('=').unwrap(); p.set(k, v.parse().unwrap()); }
     let mut e = Encoder::new(w, h); e.push_frame(&f, w * 4);
-    let t = std::time::Instant::now(); let o = e.encode(&p); let ms = t.elapsed().as_secs_f64() * 1e3;
+    let t = std::time::Instant::now(); let o = e.encode(&p, 0); let ms = t.elapsed().as_secs_f64() * 1e3;
     let mut by: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
     for op in &o.ops { let n = to_postcard(op).len(); let x = by.entry(op.kind()).or_default(); x.0 += n; x.1 += 1 }
     let tot: usize = by.values().map(|x| x.0).sum();

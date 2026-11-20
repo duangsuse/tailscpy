@@ -38,7 +38,8 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
     private var lastHints = ""
     private var offStrikes = 0; private var goneStrikes = 0; private var blankStrikes = 0
     private var lastStackCheck = 0L; private var lastTree = 0L
-    private val home: String? by lazy { sh("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1").substringBefore('/').takeIf { it.contains('.') } }
+    private val homeComp: String? by lazy { sh("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1").trim().takeIf { it.contains('/') } }
+    private val home: String? get() = homeComp?.substringBefore('/')
 
     // ───────── 启动 ─────────
     /** 起网络：绑回环 + tailnet（100.64/10）网卡；`lan` 额外绑私网网卡（开发用，默认不开：50 §5）。 */
@@ -159,7 +160,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
         offStrikes = 0; goneStrikes = 0; blankStrikes = 0; lastEditable = false; lastHints = ""
         val fl: (FrameMeta) -> Unit = { m -> if (m.changedRows > 0) Native.frame(pf.curLocked()) }
         frameL = fl; pf.onFrame(fl)
-        val al: (JSONObject) -> Unit = { ev -> val k = ev.optString("kind"); if (k.contains("WINDOW") || k.contains("VIEW_FOCUSED") || k.contains("SCROLLED") || k.contains("TEXT_SELECTION")) hintAt = System.currentTimeMillis() + 250 }
+        val al: (JSONObject) -> Unit = { ev -> val k = ev.optString("kind"); if (k.contains("WINDOW") || k.contains("VIEW_FOCUSED") || k.contains("SCROLLED") || k.contains("TEXT_SELECTION")) hintAt = System.currentTimeMillis() + 120 }
         a11yL = al; a11y.events.add(al)
         active = true
         resend()
@@ -206,7 +207,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
             if (!active) continue
             try {
                 if (detachAt > 0 && now >= detachAt) { detachAt = 0; log("断线超时，关闭会话"); closeApp(); continue }
-                if (hintAt in 1..now && now - lastTree >= 300) { hintAt = 0; lastTree = now; refreshHints() }
+                if (hintAt in 1..now && now - lastTree >= 150) { hintAt = 0; lastTree = now; refreshHints() }
                 if ((stackAt in 1..now) || now - lastStackCheck >= 2000) { stackAt = 0; lastStackCheck = now; checkStack() }
                 if (now - lastSec >= 1000) {
                     lastSec = now
@@ -244,7 +245,8 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
 
     /** `*` 模式：任务没了就把桌面起在虚拟屏上，之后从桌面点开的 App 自然在虚拟屏上。 */
     private fun launchHome(): Boolean {
-        val out = sh("am start --display ${pf.displayId} -a android.intent.action.MAIN -c android.intent.category.HOME")
+        // 只给 HOME intent 会被“送达物理屏上已在运行的桌面”；显式组件名才会起在虚拟屏上（真机实测，见 probe-*.md）
+        val out = sh("am start --display ${pf.displayId} -n ${homeComp ?: return false} -f 0x10000000")
         log("`*`：桌面起在虚拟屏: ${out.lines().joinToString(" | ")}")
         return !(out.contains("Error") || out.contains("Exception"))
     }
