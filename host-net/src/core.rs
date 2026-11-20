@@ -140,6 +140,7 @@ impl Core {
         *self.stats.lock().unwrap() = StatsAcc::default();
         self.rev.store(0, Ordering::Relaxed);
         *self.view.lock().unwrap() = None; *self.req.lock().unwrap() = None;   // 新会话：A 的视口还没报，不追旧目标
+        *self.wheel_f.lock().unwrap() = 168.0; self.f_learned.store(false, Ordering::Relaxed);   // 滚轮因子因 App / 容器而异：上个会话量的不能带过来
         let seq = self.next_seq();
         self.send_tx(seq, &Down::Page { seq, id: PAGE, op: PageOp::Replace, temp: true, modal: None, at_root: true,
             regions: vec![Region { id: 0, kind: RegionKind::Fixed { anchor: 0, z: 0 }, rect: Rect { x: 0, y: 0, w: w as u32, h: h as u32 }, start_y: 0 }] });
@@ -181,9 +182,9 @@ impl Core {
                 *f = rd::heuristics::update_wheel_factor(*f, r.notches.abs(), r.step as f64, shift as f64);
                 self.f_learned.store(true, Ordering::Relaxed); self.timeouts.store(0, Ordering::Relaxed);
                 *req = None;
-            } else if r.t.elapsed() > Duration::from_millis(700) {
+            } else if r.t.elapsed() > Duration::from_millis(700) && !enc.holding {
                 // 一次没响应可能只是慢（注入 + 出帧 + 合并等待）：重发一次；连续两次才算“滚不动了”= 到边
-                if self.timeouts.fetch_add(1, Ordering::Relaxed) >= 1 { enc.expect_timeout(); self.timeouts.store(0, Ordering::Relaxed) } else { enc.set_expect(None) }
+                if self.timeouts.fetch_add(1, Ordering::Relaxed) >= 1 { enc.expect_timeout(self.t0.elapsed().as_millis() as u64); self.timeouts.store(0, Ordering::Relaxed) } else { enc.set_expect(None) }
                 *req = None; self.dbg_req.lock().unwrap().1 += 1
             } else { return }
         }
@@ -290,17 +291,19 @@ pub fn encoder_loop(core: Arc<Core>) {
         // 3. 编
         let p = core.params.lock().unwrap().clone();
         let t = Instant::now();
-        let (ops, rows, defer, regions, shift, resets, ov_pending) = {
+        let (ops, rows, defer, regions, shift, resets, ov_pending, holding) = {
             let mut g = core.enc.lock().unwrap();
             let Some(enc) = g.as_mut() else { continue };
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
-            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy, enc.n_reset, o.ov_pending)
+            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy, enc.n_reset, o.ov_pending, enc.holding)
         };
         let more = defer; core.deferring.store(defer, Ordering::Relaxed);
         // 换页（滚动画布被清空）：旧视口目标作废，等 A 重新报
         if resets != core.last_resets.swap(resets, Ordering::Relaxed) { *core.view.lock().unwrap() = None; *core.req.lock().unwrap() = None }
         core.drive_scroll(shift);
         if let Some(rs) = regions { let seq = core.next_seq(); core.send_tx(seq, &Down::Regions { seq, page: PAGE, regions: rs }); }
+        // 注入的滚动还在等稳定帧（位移认不出被按住）：过一会儿拿最新帧再认一次
+        if holding && ops.is_empty() { std::thread::sleep(Duration::from_millis(40)); core.kick_soft(); continue }
         if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } else if ov_pending { std::thread::sleep(Duration::from_millis(50)); core.kick_soft() } continue }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         // 4. 统计（逐 Op 的线上字节）
@@ -321,6 +324,7 @@ pub fn encoder_loop(core: Arc<Core>) {
             s.frames += 1; s.rows_sent += rows as u64; s.enc_ms_last = ms; s.enc_ms_total += ms; s.tx_bytes += n; s.tx_msgs += 1;
         }
         if more { std::thread::sleep(Duration::from_millis(50)); core.kick() }   // 有压后的条带：过一会儿再编（等 A11y 提案）
+        else if holding { std::thread::sleep(Duration::from_millis(40)); core.kick_soft() }
         else if ov_pending { std::thread::sleep(Duration::from_millis(50)); core.kick_soft() }   // 有在途的 Overlay：回来判断 Commit / Drop
     }
 }

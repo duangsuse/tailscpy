@@ -186,38 +186,70 @@ function refreshScroll() {
   const o = JSON.parse(outText(n)); const old = S.sc
   const sameCols = old && old.rect[0] === o.rect[0] && old.rect[2] === o.rect[2]
   if (sameCols && old.rect[1] !== o.rect[1]) S.vy += o.rect[1] - old.rect[1]   // 吸顶 / 吸底的行被切出去：区域上沿下移，视口（区域顶行的画布 y）跟着加
-  const first = !old || !sameCols
+  // 已知范围只增不减；缩小了 = B 清空了画布（换页 / 认不出位移）：旧视口指向的内容已不存在，只能回到 B 的采集头
+  const cleared = !!old && sameCols && (o.y_min > old.ymin || o.y_max < old.ymax)
+  const first = !old || !sameCols || cleared
   S.sc = { rect: o.rect, head: o.head, ymin: o.y_min, ymax: o.y_max, atTop: o.at_top, atBot: o.at_bottom }
-  if (first) { S.vy = o.head; S.follow = true; sendView() }   // 跟随时也报视口：B 才知道目标就是现在的采集头（否则它会去追旧目标）
+  if (first) { cancelAnimationFrame(fling); S.vel = 0; S.vy = o.head; S.follow = true; sendView() }   // 跟随时也报视口：B 才知道目标就是现在的采集头（否则它会去追旧目标）
   else if (S.follow) { if (S.vy !== o.head) { S.vy = o.head; sendView() } }
   else if (Math.abs(S.vy - o.head) < 1 && performance.now() - S.lastUser > 300) S.follow = true   // B 追上了，且用户停手一会儿：恢复跟随
+  kickSettle()   // 到边的判定可能刚变（真到底了 / 误判撤销），视口在新边界外就缓缓拉回去，不要一下跳过去
 }
-function clampVy(v: number) {
-  const s = S.sc; if (!s) return v
-  // 到顶 / 到底就停在已知边缘；否则最多比已知范围多滚一屏（B 的采集头要追，滚太远只会一片占位）
+/** 视口的活动范围 [lo, hi]。到顶 / 到底 = 硬边（越界是橡皮筋）；还没探到头的一侧最多比已知范围多一屏（B 的采集头要追，滚太远只会一片占位） */
+function bounds(): [number, number] {
+  const s = S.sc; if (!s) return [-Infinity, Infinity]
   const rh = s.rect[3]
   const lo = s.atTop ? s.ymin : s.ymin - rh, hi = s.atBot ? s.ymax - rh : s.ymax
-  return Math.min(Math.max(v, lo), Math.max(hi, lo))
+  return [lo, Math.max(hi, lo)]
 }
-function sendView() {   // 视口变了就上报（只保留最新值，≤ 每 30 ms 一次）
+const clampVy = (v: number) => { const [lo, hi] = bounds(); return Math.min(Math.max(v, lo), hi) }
+function sendView() {   // 视口变了就上报（只保留最新值，≤ 每 30 ms 一次）。越界的橡皮筋部分只是 A 的动画，B 的目标夹在范围内
   if (!S.sc) return
   const now = performance.now(); if (now - S.viewSent < 30) { setTimeout(sendView, 30 - (now - S.viewSent)); return }
-  S.viewSent = now; send({ View: { page: 1, region: 1, y: Math.round(S.vy), vy: S.vel } })
+  S.viewSent = now; send({ View: { page: 1, region: 1, y: Math.round(clampVy(S.vy)), vy: S.vel } })
+}
+/** 视口按 dy 移动。硬边处越拉越费力（橡皮筋，最多约 30% 区域高）；软边处停住。已经在边界外的位置不往回拽（交给 settle 平滑拉回） */
+function moveVy(dy: number): number {
+  const s = S.sc!, rh = s.rect[3], [lo, hi] = bounds(); const v = S.vy
+  const damp = (over: number) => 0.5 * Math.max(0, 1 - Math.abs(over) / (0.15 * rh))
+  if (dy > 0) {
+    if (v >= hi) return s.atBot ? v + dy * damp(v - hi) : v
+    const room = hi - v; return dy <= room ? v + dy : hi + (s.atBot ? (dy - room) * damp(0) : 0)
+  }
+  if (v <= lo) return s.atTop ? v + dy * damp(lo - v) : v
+  const room = v - lo; return -dy <= room ? v + dy : lo - (s.atTop ? (-dy - room) * damp(0) : 0)
 }
 function userScroll(dy: number) {   // dy：设备像素，正 = 内容上移（往下滚）
   if (!S.sc) return
   S.follow = false; S.lastUser = S.lastScrollT = performance.now()
-  S.vy = clampVy(S.vy + dy); sendView(); scheduleRender()
+  S.vy = moveVy(dy); sendView(); scheduleRender(); kickSettle()
+}
+// 松手 / 滚轮停下后：视口在范围外就按指数缓动拉回（橡皮筋回弹；也用于真到底的判定晚到时的“回滚”，不会一下子跳过去）
+let settling = 0, flinging = false
+function kickSettle() { if (!settling) { settling = requestAnimationFrame(settleStep); S.settleT = performance.now() } }
+function settleStep(t: number) {
+  settling = 0
+  if (!S.sc) return
+  const [lo, hi] = bounds(), v = S.vy, target = Math.min(Math.max(v, lo), hi)
+  if (v === target) return
+  const busy = flinging || (down && down.scroll) || performance.now() - S.lastScrollT < 80
+  if (!busy) {
+    const dt = Math.min(50, t - S.settleT)
+    const d = target - v; S.vy = Math.abs(d) < 0.5 ? target : v + d * (1 - Math.exp(-dt / 80))
+    S.lastScrollT = S.lastUser; sendView(); scheduleRender()
+  }
+  S.settleT = t; settling = requestAnimationFrame(settleStep)
 }
 let fling = 0
 function startFling(v: number) {   // v：像素 / ms
-  cancelAnimationFrame(fling); if (Math.abs(v) < 0.05) return
-  let last = performance.now()
+  cancelAnimationFrame(fling); flinging = false; if (Math.abs(v) < 0.05) return
+  let last = performance.now(); flinging = true
   const step = (t: number) => {
     const dt = Math.min(50, t - last); last = t; const before = S.vy   // 标签页在后台时 rAF 停摆，回来第一帧 dt 很大
-    S.vy = clampVy(S.vy + v * dt); v *= Math.pow(0.995, dt)   // 摩擦
+    S.vy = moveVy(v * dt); v *= Math.pow(0.995, dt)   // 摩擦
     S.lastUser = S.lastScrollT = t; sendView(); scheduleRender()
-    if (Math.abs(v) < 0.03 || S.vy === before) { S.vel = 0; return }
+    const [lo, hi] = bounds(), out = S.vy < lo || S.vy > hi
+    if (Math.abs(v) < 0.03 || S.vy === before || out) { S.vel = 0; flinging = false; kickSettle(); return }   // 撞到边界：惯性到此为止，橡皮筋拉回
     S.vel = v; fling = requestAnimationFrame(step)
   }
   fling = requestAnimationFrame(step)

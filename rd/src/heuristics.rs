@@ -18,8 +18,10 @@ pub struct ShiftCfg {
     pub margin: f64,
     /// 预期位移附近尝试的半径
     pub near: i32,
+    /// 验证预期位移时放宽的最低比例：刚滚完时缩略图 / 异步出图让一部分重叠行对不上，但预期位移（±near）上还有一大片行精确平移，不会是巧合
+    pub exp_ratio: f64,
 }
-impl Default for ShiftCfg { fn default() -> Self { ShiftCfg { min_ratio: 0.6, min_rows: 8, max_dup: 8, margin: 1.5, near: 3 } } }
+impl Default for ShiftCfg { fn default() -> Self { ShiftCfg { min_ratio: 0.6, min_rows: 8, max_dup: 8, margin: 1.5, near: 3, exp_ratio: 0.2 } } }
 
 fn score(prev: &[u64], cur: &[u64], info: &[bool], dy: i32) -> (u32, u32) {
     let (mut m, mut t) = (0u32, 0u32);
@@ -41,13 +43,14 @@ pub fn detect_shift(prev: &[u64], cur: &[u64], info: &[bool], expected: Option<i
     if n < 4 { return None }
     let (prev, cur, info) = (&prev[..n], &cur[..n], &info[..n]);
     let ok = |m: u32, t: u32| t > 0 && m >= cfg.min_rows && m as f64 >= cfg.min_ratio * t as f64;
+    let ok_exp = |m: u32, t: u32| t > 0 && m >= cfg.min_rows && m as f64 >= cfg.exp_ratio * t as f64;
     // 1. 已知预期位移：验证它附近的候选，取匹配最多的
     if let Some(e) = expected {
         let mut best: Option<Shift> = None;
         for d in e - cfg.near..=e + cfg.near {
             if d == 0 || d.unsigned_abs() as usize >= n { continue }
             let (m, t) = score(prev, cur, info, d);
-            if ok(m, t) && best.map_or(true, |b| m > b.matched) { best = Some(Shift { dy: d, matched: m, total: t }) }
+            if ok_exp(m, t) && best.map_or(true, |b| m > b.matched) { best = Some(Shift { dy: d, matched: m, total: t }) }
         }
         if best.is_some() { return best }
     }
@@ -65,9 +68,13 @@ pub fn detect_shift(prev: &[u64], cur: &[u64], info: &[bool], expected: Option<i
     let mut v: Vec<(i32, f64)> = votes.into_iter().collect();
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.abs().cmp(&b.0.abs())));
     let (d1, s1) = *v.first()?;
-    if let Some(&(_, s2)) = v.get(1) { if s1 < cfg.margin * s2 { return None } }
+    // 第二名只看离第一名 ≥3 像素的：小数像素的滚动会让一部分条目平移 d、另一部分平移 d±1，两者是同一次滚动，不是竞争对手
+    let s2 = v.iter().find(|(d, _)| (d - d1).abs() > 2).map_or(0.0, |x| x.1);
+    if s1 < cfg.margin * s2 { return None }
     let (m, t) = score(prev, cur, info, d1);
-    if ok(m, t) { Some(Shift { dy: d1, matched: m, total: t }) } else { None }
+    // 刚注入过滚动（有预期位移）：位移本来就很可能发生，只是实际量和预期差得多（滚轮因子没量准）或有一部分行还在加载，比例按放宽的算
+    let fits = if expected.is_some() { ok_exp(m, t) && s1 >= 2.0 * s2 } else { ok(m, t) };
+    if fits { Some(Shift { dy: d1, matched: m, total: t }) } else { None }
 }
 
 /// 滚轮因子（像素 / 格）的估计：按“请求了 `notches` 格、实测位移 `dy` 像素”更新。
@@ -76,7 +83,7 @@ pub fn update_wheel_factor(f_est: f64, notches: f64, requested_px: f64, dy: f64)
     if notches.abs() < 1e-6 || dy.abs() < 4.0 { return f_est }
     if dy.abs() < 0.5 * requested_px.abs() { return f_est }
     let f = dy.abs() / notches.abs();
-    if f_est <= 0.0 { f } else { 0.5 * f_est + 0.5 * f }
+    if f_est <= 0.0 || (f - f_est).abs() > 0.1 * f_est { f } else { 0.5 * f_est + 0.5 * f }   // 差得多（换了容器 / 初值不对）直接采用实测，别让旧值拖着：位移预期不准会让位移检测多走弯路
 }
 
 #[cfg(test)]
@@ -121,8 +128,18 @@ mod tests {
         let s = detect_shift(&prev, &cur, &vec![true; 200], None, &ShiftCfg::default());
         assert_eq!(s.map(|x| x.dy), Some(25));
     }
+    #[test] fn expected_shift_survives_half_the_rows_reloading() {
+        // 缩略图刚滚进来还在加载：重叠行里一半对不上。预期位移上仍有大片精确平移 → 认；没有预期位移时按 0.6 的比例不认
+        let all = rows(900, 5); let prev = all[100..500].to_vec(); let mut cur = all[300..700].to_vec();   // cur[r] == prev[r + 200]
+        for r in 0..100 { cur[r] = 777_000 + r as u64 }
+        let cfg = ShiftCfg::default();
+        let s = detect_shift(&prev, &cur, &vec![true; 400], Some(203), &ShiftCfg { near: 5, ..cfg }).unwrap();
+        assert_eq!(s.dy, 200);
+        assert!(detect_shift(&prev, &cur, &vec![true; 400], None, &cfg).is_none());
+    }
     #[test] fn wheel_factor_learns_and_ignores_edge() {
-        let f = update_wheel_factor(168.0, 1.0, 168.0, 357.0); assert!(f > 250.0 && f < 270.0);
+        assert_eq!(update_wheel_factor(168.0, 1.0, 168.0, 357.0), 357.0);   // 差得远：直接采用实测
+        let f = update_wheel_factor(200.0, 1.0, 200.0, 208.0); assert!(f > 203.0 && f < 205.0);   // 差得不多：平滑
         assert_eq!(update_wheel_factor(168.0, 1.0, 168.0, 10.0), 168.0);   // 到边：位移远小于预期
     }
 }

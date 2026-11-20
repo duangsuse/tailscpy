@@ -140,21 +140,27 @@ class A11y {
     }
 
     /**
-     * Scroll 区域提案 [x,y,w,h]（20 §3）：虚拟屏上面积最大的、可见的纵向滚动节点。
+     * Scroll 区域提案 [x,y,w,h,flags]（20 §3）：虚拟屏上面积最大的、可见的纵向滚动节点（面积相同取更深的那个：外面常套着一层同尺寸的壳）。
+     * flags：bit0 = 还能往下滚（SCROLL_FORWARD 动作在），bit1 = 还能往上滚；节点两个动作都没有时不带 flags。到边判断只用它来撤销误判。
      * 排除横向容器（HorizontalScrollView、ViewPager 一类的 cls / id）；设置首页是整屏 ScrollView，NewPipe 是 ViewPager 里的 GridView。
      */
     fun scrollRegion(display: Int): JSONArray {
-        var best: Rect? = null; var bestA = 0
+        var best: Rect? = null; var bestA = 0; var bestFlags = -1
         fun walk(n: AccessibilityNodeInfo, d: Int) {
             val cls = n.className?.toString() ?: ""; val id = n.viewIdResourceName ?: ""
             if (n.isScrollable && n.isVisibleToUser && !Regex("Horizontal|Pager", RegexOption.IGNORE_CASE).containsMatchIn(cls + id)) {
                 val r = Rect(); n.getBoundsInScreen(r); val a = r.width() * r.height()
-                if (r.height() >= 200 && a > bestA) { bestA = a; best = r }
+                if (r.height() >= 200 && a >= bestA) {
+                    bestA = a; best = r
+                    val acts = n.actionList.map { it.id }
+                    val f = (if (AccessibilityNodeInfo.ACTION_SCROLL_FORWARD in acts) 1 else 0) or (if (AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD in acts) 2 else 0)
+                    bestFlags = if (f == 0) -1 else f
+                }
             }
             if (d < 40) for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, d + 1) }
         }
         for (w in windowsOn(display)) w.root?.let { walk(it, 0) }
-        return best?.let { JSONArray().put(it.left).put(it.top).put(it.width()).put(it.height()) } ?: JSONArray()
+        return best?.let { JSONArray().put(it.left).put(it.top).put(it.width()).put(it.height()).also { a -> if (bestFlags >= 0) a.put(bestFlags) } } ?: JSONArray()
     }
 
     /** 节点树摘要（每行一个有意义的节点），调试口打印用。 */

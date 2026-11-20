@@ -112,8 +112,10 @@ pub extern "system" fn Java_hj_Native_view(_env: JNIEnv, _c: JClass, y: jint) { 
 pub extern "system" fn Java_hj_Native_scrollRegion(mut env: JNIEnv, _c: JClass, json: JString) {
     let j = s(&mut env, &json);
     let Some(c) = core() else { return };
-    let r = serde_json::from_str::<Vec<u32>>(&j).ok().filter(|v| v.len() == 4).map(|v| Rect { x: v[0], y: v[1], w: v[2], h: v[3] });
-    if let Some(e) = c.enc.lock().unwrap().as_mut() { e.set_scroll_proposal(r) }
+    let v = serde_json::from_str::<Vec<u32>>(&j).unwrap_or_default();
+    let r = Some(v.as_slice()).filter(|v| v.len() >= 4).map(|v| Rect { x: v[0], y: v[1], w: v[2], h: v[3] });
+    let dirs = v.get(4).map(|f| (f & 1 != 0, f & 2 != 0));
+    if let Some(e) = c.enc.lock().unwrap().as_mut() { e.set_scroll_proposal(r); e.set_scroll_dirs(dirs) }
     c.kick();
 }
 
@@ -154,7 +156,7 @@ pub extern "system" fn Java_hj_Native_stats(env: JNIEnv, _c: JClass) -> jstring 
         "enc_ms_last": st.enc_ms_last, "enc_ms_total": st.enc_ms_total, "inflight": c.inflight(),
         "connected": c.conn.lock().unwrap().is_some(),
         "wheel_f": *c.wheel_f.lock().unwrap(), "req": req, "view": *c.view.lock().unwrap(),
-        "scroll": c.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, r)| serde_json::json!({"head": h, "rect": [r.x, r.y, r.w, r.h], "edges": e.scroll_edges(), "n_shift": e.n_shift, "n_reset": e.n_reset, "n_unexplained": e.n_unexplained, "rows_new": e.n_rows_new, "rows_changed": e.n_rows_changed, "n_pin": e.n_pin, "last_unexplained": e.last_unexplained}))),
+        "scroll": c.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, r)| serde_json::json!({"head": h, "rect": [r.x, r.y, r.w, r.h], "edges": e.scroll_edges(), "n_shift": e.n_shift, "n_reset": e.n_reset, "n_unexplained": e.n_unexplained, "rows_new": e.n_rows_new, "rows_changed": e.n_rows_changed, "n_pin": e.n_pin, "last_unexplained": e.last_unexplained, "log": e.dbg_log.iter().collect::<Vec<_>>()}))),
     });
     js(&env, &j.to_string())
 }

@@ -81,6 +81,13 @@ pub struct Encoder {
     pub n_rows_changed: u64,
     skip_prev_diff: bool,
     pub last_unexplained: (usize, usize),
+    /// 调试：最近的滚动事件（位移 / 到边 / 换页 / 认不出位移），经 net_stats 取出
+    pub dbg_log: std::collections::VecDeque<String>,
+    /// A11y 报的该容器还能不能往前（下）/ 往后（上）滚：到边的权威来源（注入滚动“没动静”可能只是慢 / 图片在加载，不能凭它判到边）
+    a11y_dirs: Option<(bool, bool)>,
+    hold_since: Option<u64>,
+    /// 这一帧因“注入了滚动但位移还认不出”被按住（等图片加载稳定）：调用方过一会儿要再编一次，且这期间没有位移不能当成“滚不动”
+    pub holding: bool,
 }
 
 /// `defer`：有“像素上像照片、但 A11y 还没确认”的条带被压后了（图片先别当无损发），调用方过一会儿要再编一次
@@ -88,6 +95,13 @@ pub struct Encoder {
 pub struct Out { pub ops: Vec<Op>, pub rows: u32, pub defer: bool, pub regions: Option<Vec<Region>>,
     /// 还有在途的 Overlay：过一会儿要回来判断 Commit / Drop（但这不影响“画面是否稳定”）
     pub ov_pending: bool }
+
+/// 这一帧相对上一帧的变化“像整体位移”：有信息量的行里几乎每一行都和上一帧同位置不同。
+/// 缩略图 / 光标 / 动画只让其中一部分行变化（大部分文字行原封不动），那是原地变化，不是滚动。
+fn shift_like(info: &[bool], cur: &[u64], prev: &[u64]) -> bool {
+    let n = info.iter().filter(|&&b| b).count();
+    n > 0 && info.iter().zip(cur.iter().zip(prev)).filter(|(&i, (c, p))| i && c != p).count() as f64 >= 0.75 * n as f64
+}
 
 fn remap(op: Op, region: u16, f: &dyn Fn(u32) -> u32) -> Op {
     let m = |d: Dst| Dst { region, y: f(d.y), ..d };
@@ -104,7 +118,7 @@ impl Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], info: vec![false; h], stale: vec![true; h],
             a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], fmask: Mask::full(w as u32), hints: vec![], defer_since: None,
-            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, ovs: vec![], next_ov: 1, last_shift_ms: 0, img_sig: HashMap::new(), defer_sent: HashMap::new(), dedupe_on: true, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
+            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, ovs: vec![], next_ov: 1, last_shift_ms: 0, img_sig: HashMap::new(), defer_sent: HashMap::new(), dedupe_on: true, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0), dbg_log: Default::default(), a11y_dirs: None, hold_since: None, holding: false,
         }
     }
 
@@ -118,13 +132,24 @@ impl Encoder {
 
     /// A11y 给的 Scroll 区域提案（屏幕像素，取其竖直范围，宽度一律整屏）。None = 没有可滚动区域。
     pub fn set_scroll_proposal(&mut self, r: Option<Rect>) { self.proposal = r.map(|r| Rect { x: 0, y: r.y.min(self.h as u32), w: self.w as u32, h: r.h.min((self.h as u32).saturating_sub(r.y)) }).filter(|r| r.h >= 64) }
+    /// A11y 报的该容器还能不能往下 / 往上滚（没给 = None）
+    pub fn set_scroll_dirs(&mut self, dirs: Option<(bool, bool)>) { self.a11y_dirs = dirs; self.reconcile_edges(); }
+    /// A11y 只用来**撤销**误判的到边标记：它说还能往下（上）滚，就一定不是到底（顶）。反过来不采信——容器上叠了别的可滚节点时，
+    /// 它给出的“不能滚”可能属于另一个节点，凭它置到边会把用户挡在已知范围里
+    fn reconcile_edges(&mut self) {
+        let (Some((fwd, back)), Some(s)) = (self.a11y_dirs, self.scroll.as_mut()) else { return };
+        if fwd { s.at_bottom = false } if back { s.at_top = false }
+    }
 
     /// 刚注入了一次滚动，预期这一帧起位移约为 dy（像素，往下滚为正）；None = 没有
     pub fn set_expect(&mut self, dy: Option<i32>) { self.expect = dy }
+    fn dbg(&mut self, now_ms: u64, s: String) { if self.dbg_log.len() >= 300 { self.dbg_log.pop_front(); } self.dbg_log.push_back(format!("{now_ms} {s}")) }
 
     /// 预期的滚动一直没有帧响应（滚不动了）：按方向记“到边”
-    pub fn expect_timeout(&mut self) {
+    pub fn expect_timeout(&mut self, now_ms: u64) {
+        let e0 = self.expect;
         if let (Some(e), Some(s)) = (self.expect.take(), self.scroll.as_mut()) { if e > 0 { s.at_bottom = true } else if e < 0 { s.at_top = true } }
+        self.dbg(now_ms, format!("timeout expect={e0:?} -> edges={:?}", self.scroll_edges()));
     }
 
     /// 采集头（屏幕第一行对应的画布 y）和滚动区矩形
@@ -365,8 +390,9 @@ impl Encoder {
         self.dedupe_on = p.get("dedupe_strips") > 0.5;
         let level = p.get("zstd_level") as i32; let strip = (p.get("strip_rows") as usize).max(1);
         let mut ops: Vec<Op> = vec![];
-        self.last_dy = 0;
+        self.last_dy = 0; self.holding = false;
         let mut regions = self.sync_scroll(p, &mut ops, now_ms);
+        self.reconcile_edges();
         let (smask, scroll_rows) = match &self.scroll { Some(s) => (Some(s.smask.clone()), s.rect.y as usize..(s.rect.y + s.rect.h) as usize), None => (None, 0..0) };
         for y in 0..h {
             if self.stale[y] {
@@ -492,14 +518,16 @@ impl Encoder {
     /// Scroll 区域一帧：求位移 → 采集头 → 缺的行（内容坐标）→ 编码。返回写了多少行。
     fn encode_scroll(&mut self, p: &Params, now_ms: u64, defer_on: bool, level: i32, strip: usize, ops: &mut Vec<Op>, img_ops: &mut Vec<Op>, deferred: &mut [bool]) -> u32 {
         let (w, rb) = (self.w, self.w * 4);
-        let cfg = ShiftCfg { min_ratio: p.get("shift_min_ratio"), min_rows: p.get("shift_min_rows") as u32, ..Default::default() };
+        let hold_ms = p.get("shift_hold_ms") as u64;
+        let cfg = ShiftCfg { min_ratio: p.get("shift_min_ratio"), min_rows: p.get("shift_min_rows") as u32, near: self.expect.map_or(3, |e| (e.abs() / 25).max(3)), ..Default::default() };
         let page_change = p.get("page_change_ratio");
         let (rect, sb) = { let s = self.scroll.as_ref().unwrap(); (s.rect, s.sb as usize) };
         let (y0, rh) = (rect.y as usize, rect.h as usize);
         let ch: Vec<u64> = self.cur_hash[y0..y0 + rh].to_vec(); let info: Vec<bool> = self.info[y0..y0 + rh].to_vec();
         let expect = self.expect;
         let s = self.scroll.as_mut().unwrap();
-        let mut dy = 0i32; let mut reset = false;
+        let mut dy = 0i32; let mut reset = false; let mut hold = false;
+        let mut evs: Vec<String> = vec![];
         if s.prev_ok {
             let same = ch.iter().zip(&s.prev_h).filter(|(a, b)| a == b).count();
             if same == rh {
@@ -507,10 +535,25 @@ impl Encoder {
             } else if let Some(sh) = { let ev: Vec<bool> = (0..rh).map(|i| info[i] && ch[i] != s.prev_h[i]).collect(); detect_shift(&s.prev_h, &ch, &ev, expect, &cfg) } {   // 只拿“和上一帧同位置不同”的行当证据：吸顶的行不动，不该拖低匹配比例
                 dy = sh.dy; s.head += dy as i64; self.last_dy = dy; self.n_shift += 1; self.last_shift_ms = now_ms;
                 if let Some(e) = expect { if (dy.abs() as f64) < 0.5 * e.abs() as f64 { if e > 0 { s.at_bottom = true } else { s.at_top = true } } else { s.at_top = false; s.at_bottom = false } }
+                evs.push(format!("shift dy={dy} expect={expect:?} match={}/{} edges=({},{})", sh.matched, sh.total, s.at_top, s.at_bottom));
                 self.expect = None;
-            } else if (rh - same) as f64 > page_change * rh as f64 { reset = true }
-            else { self.n_unexplained += 1; self.last_unexplained = (rh - same, rh); self.expect = None; /* 画面变了只是认不出位移：不是“滚不动”，别记到边 */ }
+            } else if expect.is_some() && shift_like(&info, &ch, &s.prev_h) && now_ms.saturating_sub(*self.hold_since.get_or_insert(now_ms)) < hold_ms {
+                // 注入了滚动、画面也变了，但认不出位移：多半是缩略图 / 异步内容还在加载的中间帧。这一帧不当“上一帧”、不写任何东西，等稳定帧
+                // （拿中间帧当基准会让后面的位移全认不出，连锁换页；认不出位移就当原地变化写画布则会把整屏错位写进画布）
+                hold = true; evs.push(format!("hold changed={} expect={expect:?}", rh - same));
+            } else if (rh - same) as f64 > page_change * rh as f64 { reset = true; evs.push(format!("RESET changed={} expect={expect:?}", rh - same)) }
+            else {
+                self.n_unexplained += 1; self.last_unexplained = (rh - same, rh); evs.push(format!("unexplained changed={} expect={expect:?}", rh - same));
+                // 画面变了只是认不出位移：不是“滚不动”，别记到边。变化不像位移（缩略图 / 光标在原地变）时滚动可能还没发生，预期位移留着给后面的帧用；
+                // 像位移却一直认不出（按住超时）才放弃预期
+                if shift_like(&info, &ch, &s.prev_h) { self.expect = None }
+            }
         }
+        if !hold { self.hold_since = None }
+        if hold { self.holding = true }
+        for e in evs { self.dbg(now_ms, e) }
+        if hold { return 0 }
+        let s = self.scroll.as_mut().unwrap();
         // 吸顶 / 吸底：这一帧有位移时，滚动区顶部（底部）一段行没有跟着动（和上一帧同位置相同、却对不上位移后的位置）→ 切出去当 Fixed，
         // Scroll 区域缩小（20 §3：吸顶标题 / 浮层）。head 换成新顶行的画布 y，known 不动。
         let pin_min = p.get("pin_min_rows") as usize;
@@ -852,6 +895,22 @@ mod tests {
         let o2 = srun(&mut e, &mut c, &p, &scroll_frame(40), 20); assert!(compose_equals(&mut c, &scroll_frame(40), 20));
         assert!(sbytes(&o2) * 3 < sbytes(&o0));
     }
+    #[test] fn transitional_frame_after_injected_scroll_is_held_not_reset() {
+        // 注入滚动后抓到的第一帧缩略图还在加载（大部分行对不上）：按住，不换页、不写画布；稳定帧到了照常认出位移
+        let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
+        e.set_scroll_proposal(Some(srect()));
+        srun(&mut e, &mut c, &p, &scroll_frame(0), 0);
+        e.set_expect(Some(30));
+        let mut bad = scroll_frame(30);
+        for y in HDR..SH - FTR - 12 { for x in 0..SW - 20 { let o = (y * SW + x) * 4; bad[o..o + 3].copy_from_slice(&[(y * 7 + x * 13) as u8, (y * 3) as u8, (x * 5 + y) as u8]) } }
+        let o = srun(&mut e, &mut c, &p, &bad, 10);
+        assert!(e.holding && o.ops.iter().all(|op| !matches!(op, Op::Clear { .. })), "中间帧被按住，不换页");
+        assert_eq!(e.scroll_head().unwrap().0, ORIGIN as i64, "按住期间采集头不动");
+        let o2 = srun(&mut e, &mut c, &p, &scroll_frame(30), 60);
+        assert!(!e.holding && !o2.ops.iter().any(|op| matches!(op, Op::Clear { .. })));
+        assert_eq!(e.scroll_head().unwrap().0, ORIGIN as i64 + 30);
+        assert!(compose_equals(&mut c, &scroll_frame(30), 20));
+    }
     #[test] fn unexplained_change_resets_scroll_canvas_like_a_page_change() {
         let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
         e.set_scroll_proposal(Some(srect()));
@@ -880,7 +939,7 @@ mod tests {
         e.set_expect(Some(50)); srun(&mut e, &mut c, &p, &scroll_frame(49), 10);   // 预期 50，实际 49（精确公式的 ±1）
         assert_eq!(e.scroll_head().unwrap().0, ORIGIN as i64 + 49);
         e.set_expect(Some(100)); e.push_frame(&scroll_frame(49), SW * 4); e.encode(&p, 20);   // 滚不动：帧没变
-        e.expect_timeout(); assert_eq!(e.scroll_edges(), (false, true));
+        e.expect_timeout(0); assert_eq!(e.scroll_edges(), (false, true));
     }
     #[test] fn scroll_works_when_fixed_header_and_footer_change_too() {
         let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
