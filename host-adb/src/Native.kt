@@ -23,5 +23,8 @@ object Native {
     @JvmStatic external fun stats(): String
     /** wire 类型 JSON → postcard → JSON 往返（调试口验证用）。kind = "Up" | "Down" */
     @JvmStatic external fun roundtrip(kind: String, json: String): String
+    /** 虚拟 A（实跑模式）：进程内的 A，收线上那串 Down 并用 rd 解码 */
+    @JvmStatic external fun vaAttach(on: Boolean)
+    @JvmStatic external fun vaState(rows: Boolean): String
     fun load(path: String) { System.load(path) }
 }

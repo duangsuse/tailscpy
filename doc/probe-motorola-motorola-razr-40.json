@@ -271,5 +271,34 @@
   "restoredAfterMs": 572,
   "verdict": "通过",
   "note": "含 adb 往返开销"
+ },
+ "p5": {
+  "verdict": "部分通过",
+  "fallback": "证书 notBefore 取一天前（A/B 时钟差几分钟会让证书“还没生效”）",
+  "lan": {
+   "page": "http://localhost:8080（Chromium 157，WebTransport + serverCertificateHashes）",
+   "link": "同一 Wi-Fi 局域网 192.168.139.0/24（B=.90，A=.186）",
+   "pings": 60,
+   "rtt_ms": {
+    "p50": 7.2,
+    "p95": 24.4,
+    "max": 66.3
+   },
+   "jitter_p95_minus_p50_ms": 17.2,
+   "download": "8 MB 单向流 0.54 s = 15151 KB/s"
+  },
+  "not_tested": [
+   "Tailscale 直连 / DERP 中继：B 不在 tailnet（`tailscale status` 里没有它）",
+   "HTTPS 托管页 + Chrome 本地网络访问授权（Chrome 147+）"
+  ],
+  "notes": [
+   "浏览器路径 verify=1 跑设置 / NewPipe：0 次校验失败",
+   "B 比 A 的时钟快 85 s 时，默认的 notBefore=now 证书被 Chrome 拒（Opening handshake failed）；改成 now-1d、有效期 13 天后通过"
+  ]
+ },
+ "p9": {
+  "verdict": "通过（有回退）",
+  "note": "`*` 白名单项的“退回桌面”：`am start --display N -a MAIN -c HOME` 只会把 intent 送给物理屏上已在运行的桌面（\"delivered to currently running top-most instance\"），虚拟屏上没有桌面；改用显式组件名 `am start --display N -n <HOME 组件> -f 0x10000000` 后桌面起在虚拟屏上，从桌面点开的 App 的栈也在虚拟屏上（实测：点相册后栈顶 com.google.android.apps.photos，display 同虚拟屏）",
+  "fallback": "按 `cmd package resolve-activity` 解析出 HOME 组件显式启动"
  }
 }

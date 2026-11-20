@@ -15,6 +15,10 @@ pub trait Encoder {
     fn name(&self) -> &'static str;
     /// 喂 B 的当前整屏 RGBA（w*h*4），返回这一帧要发的东西。
     fn encode(&mut self, frame: &[u8]) -> Encoded;
+    /// 带帧时间戳（ms，录制里的时间，不读墙钟）的版本；需要时间的编码器（压后图片等）覆盖它
+    fn encode_at(&mut self, frame: &[u8], _t_ms: u64) -> Encoded { self.encode(frame) }
+    /// 把 `encode` 给出的线上字节应用到 A 画布（每种编码器自己的格式）
+    fn decode(&mut self, canvas: &mut [u8], w: usize, h: usize, wire: &[u8]) -> Result<(), String> { decode(canvas, w, h, wire) }
 }
 
 /// 脏矩形（像素坐标）。
@@ -107,6 +111,47 @@ impl Encoder for Naive {
     }
 }
 
+/// M1 的 rd 编码器（对 A 的状态求差 + 列掩码行 hash + Fill / Palette / Residual；JPEG 图片需要 A11y 提案，trace 重放里没有，所以图片按无损）。
+/// 线上字节 = postcard(Vec<Op>)；Op 名带层标签 `bg/…`、`lit/…`（40 §9）。省流机制标签在 M1 全是“字面量”：滚动 / 页缓存 / 行引用 / 精灵 M2 起才有。
+pub struct RdEnc { enc: rd::enc::Encoder, cv: rd::dec::Canvas, p: rd::params::Params }
+
+impl RdEnc {
+    pub fn new(w: usize, h: usize) -> Self {
+        let mut p = rd::params::Params::new();
+        p.set("verify", 1.0);        // bench 每帧带校验：A 端解码器重算 hash 比对
+        p.set("img_defer_ms", 0.0);  // 重放里没有定时器，也没有 A11y 提案：不压后
+        RdEnc { enc: rd::enc::Encoder::new(w, h), cv: rd::dec::Canvas::new(w, h), p }
+    }
+}
+
+impl Encoder for RdEnc {
+    fn name(&self) -> &'static str { "rd-m1" }
+    fn encode(&mut self, frame: &[u8]) -> Encoded { self.encode_at(frame, 0) }
+    fn encode_at(&mut self, frame: &[u8], t_ms: u64) -> Encoded {
+        self.enc.push_frame(frame, self.enc.w * 4);
+        let out = self.enc.encode(&self.p, t_ms);
+        if out.ops.is_empty() { return Encoded { bytes: 0, ops: vec![], wire: Some(vec![]) }; }
+        let mut by: Vec<(String, u64, u32)> = vec![];
+        for op in &out.ops {
+            let name = format!("{}/{}", op.layer(), op.kind());
+            let n = rd::wire::to_postcard(op).len() as u64;
+            match by.iter_mut().find(|x| x.0 == name) { Some(x) => { x.1 += n; x.2 += 1 } None => by.push((name, n, 1)) }
+        }
+        let wire = rd::wire::to_postcard(&out.ops);
+        let ops = by.into_iter().map(|(n, b, c)| (&*Box::leak(n.into_boxed_str()), b, c)).collect();
+        Encoded { bytes: wire.len() as u64 + 8, ops, wire: Some(wire) }
+    }
+    fn decode(&mut self, canvas: &mut [u8], _w: usize, _h: usize, wire: &[u8]) -> Result<(), String> {
+        if wire.is_empty() { return Ok(()); }
+        let ops: Vec<rd::wire::Op> = rd::wire::from_postcard(wire)?;
+        let ap = self.cv.apply(&ops)?;
+        if !ap.images.is_empty() { return Err("重放里不该出现 JPEG 图片".into()); }
+        if !ap.verify_fail.is_empty() { return Err(format!("A 端校验失败 {:?}", ap.verify_fail)); }
+        canvas.copy_from_slice(&self.cv.px);
+        Ok(())
+    }
+}
+
 /// 影子编码占位：只算脏矩形，字节数按未压缩像素 + 头估计，不真正编码（M1 起换成“被省掉的矩形按字面量编一遍”）。
 pub struct Shadow { diff: Diff }
 
@@ -173,6 +218,23 @@ mod tests {
             let e = enc.encode(&rp.cur);
             total += e.bytes;
             decode(&mut a, tr.w, tr.h, e.wire.as_ref().unwrap()).unwrap();
+            assert!(a == rp.cur, "第 {n} 帧 A 与 B 不一致");
+            n += 1;
+        }
+        assert!(n >= 8 && total > 0);
+    }
+
+    #[test]
+    fn rd_roundtrip_pixel_exact_with_verify() {
+        let tr = synth("enc", 96, 160);
+        let mut rp = Replay::new(&tr);
+        let mut enc = RdEnc::new(tr.w, tr.h);
+        let mut a = vec![0u8; tr.w * tr.h * 4];
+        let (mut total, mut n) = (0u64, 0);
+        while let Some((_, t)) = rp.advance().unwrap() {
+            let e = enc.encode_at(&rp.cur, t as u64);
+            total += e.bytes;
+            enc.decode(&mut a, tr.w, tr.h, e.wire.as_ref().unwrap()).unwrap();
             assert!(a == rp.cur, "第 {n} 帧 A 与 B 不一致");
             n += 1;
         }

@@ -170,3 +170,11 @@ sequenceDiagram
 | 图片面积占比 | `img_q` |
 | 典型滚速、可绘制耗时 | 预取距离 |
 | 无输入时的变化频率 | 是否默认 `live` |
+
+## 实现备注（M1）
+
+- 类型以 `rd/src/wire.rs` 为准。相对本文的追加：`Up::Ping{t}`、`Up::Probe{bytes}`（P5：让 B 另开一条单向流写 N 字节）、`Down::Pong{t}`；`Down::Stats` 是 `Stats{layers, saved, extra}`（键值列表，加指标不改线格式）。`Op::Verify.fold` 用全行（不带列掩码）的 hash。
+- 流：A 开 `ctl`（双向）和 `up`（单向）；B 开 `tx`（单向）。B 对两条上行流用同一个处理函数；`Ack` 在 `up` 上，`Ping` / `Tune` / `Open` 在 `ctl` 上。第一条单向流是 `tx`，之后的是探针流。
+- 缓存对齐 M1 固定回 `Welcome{Reset}`；一个 B 只服务一个 A，新连接顶掉旧连接（旧连接先收到 `Replaced`）。
+- 新参数：`coalesce_ms`（画面安静多久再编，默认 40）、`coalesce_max_ms`（最多拖多久，默认 200）、`img_defer_ms`（疑似图片等 A11y 提案的上限，默认 1000）、`img_min_colors`、`img_min_area`、`strip_rows`、`inflight_kb`、`detach_keep_s`。
+

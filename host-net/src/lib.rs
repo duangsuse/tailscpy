@@ -5,6 +5,7 @@
 
 pub mod core;
 pub mod net;
+pub mod va;
 
 use crate::core::Core;
 use jni::objects::{JByteArray, JClass, JString, ReleaseMode};
@@ -112,8 +113,10 @@ pub extern "system" fn Java_hj_Native_param(mut env: JNIEnv, _c: JClass, key: JS
 #[no_mangle]
 pub extern "system" fn Java_hj_Native_blank(_env: JNIEnv, _c: JClass) -> jboolean {
     let Some(c) = core() else { return JNI_FALSE };
+    // 锁顺序：enc → frame（编码线程同序）；这里反过来取会死锁
+    if c.enc.lock().unwrap().is_none() { return JNI_FALSE }
     let f = c.frame.lock().unwrap();
-    if f.buf.len() < 8 || c.enc.lock().unwrap().is_none() { return JNI_FALSE }
+    if f.buf.len() < 8 { return JNI_FALSE }
     let first = &f.buf[..4];
     if f.buf.chunks_exact(4).all(|p| p == first) { JNI_TRUE } else { JNI_FALSE }
 }
@@ -146,4 +149,14 @@ pub extern "system" fn Java_hj_Native_roundtrip(mut env: JNIEnv, _c: JClass, kin
         Ok(serde_json::json!({"len": bytes.len(), "hex": net::hex(&bytes), "json": serde_json::from_str::<serde_json::Value>(&back).unwrap_or_default()}))
     })();
     js(&env, &r.unwrap_or_else(|e| serde_json::json!({"err": e})).to_string())
+}
+
+/// 虚拟 A（实跑模式）：开 / 关
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_vaAttach(_env: JNIEnv, _c: JClass, on: jboolean) { if let Some(c) = core() { if on != 0 { va::attach(c) } else { va::detach(c) } } }
+
+/// 虚拟 A 的状态（JSON）；rows=true 时带每行 hash
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_vaState(env: JNIEnv, _c: JClass, rows: jboolean) -> jstring {
+    match core() { Some(c) => js(&env, &va::state(c, rows != 0).to_string()), None => js(&env, "{\"attached\":false}") }
 }

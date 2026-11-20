@@ -143,3 +143,14 @@ com.and96.aggregator_news  com.aefyr.sai
 - **看门狗**：`sh` 脚本 `watchdog.sh` 每 0.5s `kill -0` host；读 `restore.json`（扁平 JSON，`null` = 原来没设置过 → delete）。踩过的坑：`sed` 输出末行无换行，`while read` 会丢掉最后一项（现在先补 `echo`）。
 - **唤醒锁**：`open` 持有 `PARTIAL_WAKE_LOCK`，`close` 释放。探针 P7 受设备“充电时保持唤醒”影响，见 `probe-*.md`。
 - **P3、P6**：M0 未做（P3 的 tall 默认关；P6 先全程用 `dumpsys` 查询）。P5 留给 M1 任务 11。
+
+## 实现备注（M1）
+
+- **Kotlin ↔ Rust**：单向 JNI（Kotlin 调进来，Rust 不回调）。`Native.nextUp` 阻塞取上行消息 / 连接事件（JSON）；`Native.down` 下发控制类 `Down`（JSON）；`Native.frame(ByteArray)` 推最新整帧（`GetPrimitiveArrayCritical` 就地读、拷进 Rust 缓冲，只拷贝；编码在 `hj-enc` 线程）。仍然没有 ImageReader 平面的零拷贝直读（M0 备注的偏离还在）。
+- **会话层** `Session.kt`：`Up`（JSON）→ 注入；监视线程做 A11y 提案（图片矩形、可编辑焦点 → `Focus`）、策略检查（`Stack.query`，每次输入后 400 ms 一次，另每 2 s 一次）、`BlankFrame`（连续 3 s 纯色）、断线超时（`--detach-keep`，默认 60 s）。
+- **`*` 退回桌面**：只给 HOME intent，`am start --display N` 会把 intent 送给物理屏上已有的桌面（`Warning: ... delivered to currently running top-most instance`）；必须用 `cmd package resolve-activity` 解出 HOME 组件、`-n` 显式启动才会起在虚拟屏（P9）。
+- **证书**：notBefore 取一天前。B 的时钟比 A 快 85 s 时，`notBefore = now` 的证书会被 Chrome 以 “Opening handshake failed” 拒绝（实测）。
+- **调试口新增**：`wire`（扮演 A，Up 的 JSON 形式）、`wire_log`、`wire_rt`、`net`、`net_stats`、`param`、`policy`、`va_attach` / `va_state`（虚拟 A）。
+- **虚拟 A**（`host-net/src/va.rs`）：进程内的 A，收线上那串 `Down` 用 rd 解码，供场景 runner 的实跑模式使用；JPEG 不解码，比较时排除有损像素。
+- 启动参数：`--net-port 4433 --lan --allow popup,any --viewer <页面URL> --detach-keep 60 --no-net`。
+

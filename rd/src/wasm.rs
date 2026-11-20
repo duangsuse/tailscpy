@@ -70,3 +70,4 @@ fn set_out(s: &mut St, text: String) -> i32 { s.out = text.into_bytes(); s.out.l
     let px = std::slice::from_raw_parts(p, (w * h * 4) as usize);
     with(|s| match s.canvas.as_mut() { Some(c) => c.put_rgba(&Dst { region: 0, x, y, w, h }, px).map(|_| 0).unwrap_or(-1), None => -1 })
 }
+#[no_mangle] pub extern "C" fn rd_out_len() -> usize { with(|s| s.out.len()) }

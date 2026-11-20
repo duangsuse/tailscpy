@@ -118,3 +118,17 @@
 | 06 | 完成 | `rec_start` + `e2e/replay.mjs`；导出的帧与当时画面逐像素一致；时间戳单调 |
 | 07 | 完成 | 人工录制/回放 + `cold-open`、`scroll-down-up`、`enter-back`；“同一场景录两次帧内容一致”用 `--twice` 检查，结果见提交说明 |
 | 08 | 完成 | `bench/`：帧重放、朴素基线、网络模型、报表、x264；同一输入两次 `report.json` 逐字节相同 |
+
+## M1 进度（实现者记录）
+
+| # | 状态 | 说明 |
+|---|---|---|
+| 10 | 完成 | `rd/src/wire.rs`：postcard + JSON、`frame` / `Deframer`；变体序号有测试钉住。调试口 `wire` / `wire_rt` / `wire_log` 收发 JSON 形式（和网络来的 Up 同一条处理路径） |
+| 11 | 完成（P5 部分） | wtransport 0.7（ring）。证书 ECDSA P-256 13 天、notBefore 取一天前，落盘复用；token 持久化；URL 在 `/data/local/tmp/hj/url.txt`。Chromium 157 经 `http://localhost` 页面连局域网 B 通过。P5：局域网实测；**Tailscale 直连 / DERP、HTTPS 托管页未测**（B 不在 tailnet），见 `probe-*.md` |
+| 12 | 完成 | `rd/src/enc.rs` / `dec.rs` / `lit.rs`：对 A 状态求差（行 hash 表 + 影子画布）、列掩码行 hash、Fill / Palette(≤256 + 转义) / Residual、`Tx`、`Ack` 与在途字节背压。设置首屏重连 1 个 Tx ≈ 84 KB（预算 90 KB）；静止时下行 0（实测 5 s 无字节）；`verify=1` 在设置 / NewPipe 上 0 次失败。**冷启动含中间状态**（启动动画、加载中），首屏累计 200–300 KB，见实现备注 |
+| 12b | 完成 | A11y 图片矩形 + 像素确认 → JPEG（`jpeg-encoder`），A 用 `createImageBitmap` 解码后写回画布。没有提案的“像照片”条带先压后（`img_defer_ms`），提案晚到时已按无损发出的照片改发 JPEG。NewPipe 首页：无损约 2 MB → 有损 0.2–0.4 MB；文字区域 Verify 一致 |
+| 13 | 完成 | 点按 / 长按 / 拖动（`Touch` 流）/ 右键与 Esc 返回 / 滚轮透传 / 打字（含中文）/ Ctrl+C·X·V·A / `Focus`。真浏览器里实测：点设置搜索 → 输入框有焦点、打字、粘贴“粘贴OK”、返回后画面与进入前逐像素相同 |
+| 14 | 完成 | r 遮罩（最近刷新矩形按种类着色 / 图文分层）、l 面板（三层字节、链路、参数滑块经 `Tune` 即时生效）。省流分项在 M2 起才有数据，面板里先占位 |
+| 15 | 完成 | 单应用 / 额外包名 / `[popup]` / `*`（命令行 `--allow`，A 不能改）；`OffSession` 拦回、`AppGone`、`BlankFrame`；关页面后超时关虚拟屏并还原设置（实测）。`*` 的“退回桌面”需要显式 HOME 组件，见 P9 |
+| 16 | 完成 | bench 接 `rd` 编码器（Op 名带层标签，报表有三层表、对朴素基线对比表）；`e2e/scenario.mjs --live` 实跑模式：`cold-open` 11 个 App 全部通过（A 画布与 B 帧逐像素一致、Verify 0 失败） |
+

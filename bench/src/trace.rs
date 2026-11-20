@@ -213,7 +213,7 @@ pub fn synth(name: &str, w: usize, h: usize) -> Trace {
     events.push(ev(1000, "step", "tap", ""));
     let band = (h / 4, h / 4 + h / 10);
     for (i, g) in [235u8, 245].into_iter().enumerate() {
-        for y in band.0..band.1 { cur[y * w * 4..(y + 1) * w * 4].fill(g); }
+        for y in band.0..band.1 { for px in cur[y * w * 4..(y + 1) * w * 4].chunks_exact_mut(4) { px[..3].fill(g); } }   // alpha 保持 255（真机采集帧 alpha 恒 255）
         emit(1030 + 33 * i as u32, &cur, &mut prev, &mut recs, &mut events);
     }
     render(1, 0, w, h, &mut cur);

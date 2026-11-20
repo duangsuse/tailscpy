@@ -33,6 +33,9 @@ struct Cli {
     /// 抖动 PRNG 种子
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// 编码器：rd（M1，默认）或 naive（朴素基线）；rd 时报表里附带对朴素基线的对比
+    #[arg(long, default_value = "rd", value_parser = ["rd", "naive"])]
+    encoder: String,
     /// 朴素基线 zstd level
     #[arg(long, default_value_t = 3)]
     zstd: i32,
@@ -108,7 +111,7 @@ fn real_main(cli: Cli) -> Result<(), String> {
     std::fs::create_dir_all(&cli.out).map_err(|e| format!("创建 {}: {e}", cli.out.display()))?;
     let p = run::Params {
         bw: cli.bw, rtt_us: cli.rtt, jitter_us: cli.jitter, seed: cli.seed, zstd: cli.zstd, merge_gap: cli.merge_gap,
-        ignore: cli.ignore, shadow: cli.shadow, x264: !cli.no_x264,
+        ignore: cli.ignore, shadow: cli.shadow, encoder: cli.encoder.clone(), x264: !cli.no_x264,
         x264_kbps: cli.x264_kbps.unwrap_or((cli.bw * 8 / 1000).max(1) as u32), x264_fps: cli.x264_fps.max(1),
         tmp: cli.out.clone(),
     };
@@ -128,7 +131,7 @@ mod tests {
 
     fn params(tmp: PathBuf) -> run::Params {
         run::Params { bw: 400_000, rtt_us: 40_000, jitter_us: 10_000, seed: 1, zstd: 3, merge_gap: 8, ignore: vec![],
-            shadow: false, x264: false, x264_kbps: 3200, x264_fps: 30, tmp }
+            shadow: false, encoder: "rd".into(), x264: false, x264_kbps: 3200, x264_fps: 30, tmp }
     }
 
     #[test]

@@ -130,6 +130,17 @@ pub struct Placeholders {
     pub ablation: Option<f64>,
 }
 
+/// 朴素基线在同一批 trace 上的主指标（对照用）
+#[derive(Serialize)]
+pub struct Baseline {
+    pub encoder: String,
+    pub bytes_total: u64,
+    pub kb_per_min: f64,
+    pub first_visit_p90_bytes: u64,
+    pub latency_p90_ms: Option<f64>,
+    pub peak_window_bytes_1s: u64,
+}
+
 #[derive(Serialize)]
 pub struct Report {
     pub schema: u32,
@@ -138,6 +149,7 @@ pub struct Report {
     pub summary: Summary,
     pub traces: Vec<TraceReport>,
     pub placeholders: Placeholders,
+    pub baseline: Option<Baseline>,
 }
 
 fn p90(mut v: Vec<u64>) -> u64 {
@@ -210,6 +222,23 @@ pub fn markdown(r: &Report, prev: &str) -> String {
         if s.over_budget { "超出" } else { "未超出" });
     let _ = writeln!(w, "## 按 Op 类型\n\n| Op | 个数 | 字节 |\n|---|---:|---:|");
     for o in &s.ops { let _ = writeln!(w, "| {} | {} | {} |", o.name, o.count, o.bytes); }
+    // 三层（40 §9）：Op 名形如 `bg/Lit.Palette`
+    let layer = |l: &str| s.ops.iter().filter(|o| o.name.starts_with(&format!("{l}/"))).map(|o| o.bytes).sum::<u64>();
+    if s.ops.iter().any(|o| o.name.contains('/')) {
+        let tot = (layer("bg") + layer("lit") + layer("fg")).max(1);
+        let _ = writeln!(w, "\n## 三层与省流机制\n\n| 层 | 字节 | 占比 |\n|---|---:|---:|");
+        for l in ["bg", "lit", "fg"] { let _ = writeln!(w, "| {l} | {} | {:.1}% |", layer(l), 100.0 * layer(l) as f64 / tot as f64); }
+        let _ = writeln!(w, "\n省流机制标签：M1 的字节全部是“字面量”（没省）；滚动 / 页面缓存 / 行引用 / 精灵各机制的节省量从 M2 起出现。图片：trace 重放里没有 A11y 图片提案，按无损计；实跑模式（浏览器路径）才走 JPEG。");
+    }
+    if let Some(b) = &r.baseline {
+        let pct = |a: f64, c: f64| if c > 0.0 { format!("{:+.1}%", 100.0 * (a - c) / c) } else { "-".into() };
+        let _ = writeln!(w, "\n## 与朴素基线对比（同一批 trace、同一网络参数）\n\n| 指标 | `{}` | `{}` | 变化 |\n|---|---:|---:|---:|", r.encoder, b.encoder);
+        let _ = writeln!(w, "| KB/min | {:.1} | {:.1} | {} |", s.kb_per_min, b.kb_per_min, pct(s.kb_per_min, b.kb_per_min));
+        let _ = writeln!(w, "| 下行总字节 (KB) | {} | {} | {} |", kb(s.bytes_total), kb(b.bytes_total), pct(s.bytes_total as f64, b.bytes_total as f64));
+        let _ = writeln!(w, "| 首访 p90 (KB) | {} | {} | {} |", kb(s.first_visit_p90_bytes), kb(b.first_visit_p90_bytes), pct(s.first_visit_p90_bytes as f64, b.first_visit_p90_bytes as f64));
+        let _ = writeln!(w, "| 稳定耗时 p90 (ms) | {} | {} | |", opt(s.latency.p90_ms), opt(b.latency_p90_ms));
+        let _ = writeln!(w, "| 码率峰值 (KB) | {} | {} | {} |", kb(s.peak_window_bytes_1s), kb(b.peak_window_bytes_1s), pct(s.peak_window_bytes_1s as f64, b.peak_window_bytes_1s as f64));
+    }
     let _ = writeln!(w, "\n## 输入 → 画面稳定耗时（经网络模型，含上行 rtt/2）\n");
     let _ = writeln!(w, "n = {}，p50 {} ms，p90 {} ms，max {} ms。\n", s.latency.n, opt(s.latency.p50_ms), opt(s.latency.p90_ms), opt(s.latency.max_ms));
     let _ = writeln!(w, "## 峰值\n\n- 码率峰值（任意 1 s 窗口产生的字节）：{} KB\n- 发送队列峰值：{} KB\n", kb(s.peak_window_bytes_1s), kb(s.peak_queue_bytes));

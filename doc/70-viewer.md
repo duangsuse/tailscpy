@@ -142,3 +142,12 @@ hj/<cache_id>/
 | 手机浏览器 | 单指映射同上；双指缩放只改显示缩放。打开的是同一个 HTTPS 托管页 |
 | 设备像素比不是整数 | 文字会被重采样而发虚。面板提示，并提供“1:1 显示”开关 |
 | 解码中用户已滚走 | 照常应用。占位是否消失只看画布有没有内容 |
+
+## 实现备注（M1）
+
+- `viewer/main.ts` 全在主线程（Worker / OPFS 是 M3）；wasm 里存画布和“层”平面，JS 按脏矩形 `putImageData`。`window.__hj` 暴露状态给自动化测试（`S`、`sendUp`、`canvasHash`）。
+- 解码顺序：`tx` 流上的消息串行应用；`Opened`（ctl）可能晚于第一批 `tx` 到达，先攒着。每个 `Tx` 应用完（含图片异步解码写回）才回 `Ack`。
+- 输入：按下 / 抬起决定动作——抬起前没动就是 `Tap`，按住 500 ms 不动发 `LongPress`，移动超过 8 px 进入 `Touch` 流（M1 没有本地滚动，所有拖动都走 `Touch`）；`Wheel` 的 dx / dy 是“格”（deltaY / 100）。可打印字符经隐藏 textarea 的 `input` 事件成 `Text`（IME 上屏也走这里），`Focus{editable:false}` 时忽略。
+- 返回历史对齐（§4）、`at_root` 确认框、乐观上一页是 M3；M1 的 Esc / 右键只发 `Back`。
+- 本地网络访问（Chrome 147+）与 HTTPS 托管页没测；页面用 `http://localhost`。
+

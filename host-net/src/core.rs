@@ -15,7 +15,7 @@ pub struct Conn {
     pub id: u64,
     pub ctl: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     pub tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    pub conn: wtransport::Connection,
+    pub conn: Option<wtransport::Connection>,   // 虚拟 A（va.rs）没有真连接
 }
 
 #[derive(Default)]
@@ -54,6 +54,9 @@ pub struct Core {
     pub stats: Mutex<StatsAcc>,
     pub rev: AtomicU64,
     pub t0: Instant,
+    pub last_push: Mutex<Instant>,
+    pub deferring: std::sync::atomic::AtomicBool,
+    pub va: Mutex<Option<crate::va::VaState>>,
 }
 
 pub const PAGE: PageId = 1;
@@ -65,7 +68,7 @@ impl Core {
             up_tx, up_rx: Mutex::new(up_rx), params: Mutex::new(Params::new()), apps: Mutex::new(vec![]), token,
             conn: Mutex::new(None), conn_seq: AtomicU64::new(0), enc: Mutex::new(None), frame: Mutex::new(Frame { buf: vec![], w: 0, h: 0 }),
             work: Mutex::new(Work::default()), cv: Condvar::new(), tx_seq: AtomicU64::new(0), sent: AtomicU64::new(0), acked: AtomicU64::new(0),
-            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(),
+            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None),
         })
     }
 
@@ -75,7 +78,7 @@ impl Core {
     pub fn up_event(&self, json: String) { let _ = self.up_tx.send(json); }
 
     pub fn notify_frame(&self) {
-        let mut w = self.work.lock().unwrap(); let now = Instant::now();
+        let mut w = self.work.lock().unwrap(); let now = Instant::now(); *self.last_push.lock().unwrap() = now;
         w.dirty = true; w.last = Some(now); if w.first.is_none() { w.first = Some(now) }
         drop(w); self.cv.notify_all()
     }
@@ -125,11 +128,19 @@ impl Core {
         self.kick();
     }
 
+    /// 链路空闲：没有待编的帧 / 催促 / 压后条带，发出的都已被 A 应用，且最近一次推帧已过去一段时间
+    pub fn is_idle(&self) -> bool {
+        let w = self.work.lock().unwrap();
+        let applied = self.va.lock().unwrap().as_ref().map_or(self.tx_seq.load(Ordering::Relaxed), |v| v.applied_seq);
+        !w.dirty && !w.kick && !self.deferring.load(Ordering::Relaxed) && applied == self.tx_seq.load(Ordering::Relaxed)
+            && self.last_push.lock().unwrap().elapsed() >= Duration::from_millis(250)
+    }
+
     pub fn end(&self) { *self.enc.lock().unwrap() = None }
 
     pub fn stats_down(&self) -> Down {
         let s = self.stats.lock().unwrap();
-        let conn_rtt = self.conn.lock().unwrap().as_ref().map(|c| c.conn.rtt().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        let conn_rtt = self.conn.lock().unwrap().as_ref().map(|c| c.conn.as_ref().map_or(0.0, |x| x.rtt().as_secs_f64() * 1000.0)).unwrap_or(0.0);
         Down::Stats(Stats {
             layers: vec![("bg".into(), s.layers[0]), ("lit".into(), s.layers[1]), ("fg".into(), s.layers[2])],
             saved: vec![],
@@ -184,7 +195,7 @@ pub fn encoder_loop(core: Arc<Core>) {
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
             let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer)
         };
-        let more = defer;
+        let more = defer; core.deferring.store(more, Ordering::Relaxed);
         if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } continue }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         // 4. 统计（逐 Op 的线上字节）

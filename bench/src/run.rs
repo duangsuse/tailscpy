@@ -1,6 +1,6 @@
 //! 单条 trace 的重放：按录制时间戳依次喂帧、节点树、步骤 → 编码器 → 网络模型 → A 画布，收集全部指标。
 
-use crate::encoder::{decode, Encoder, Naive, Shadow};
+use crate::encoder::{Encoder, Naive, RdEnc, Shadow};
 use crate::netmodel::{peak_window_bytes, Net};
 use crate::report::*;
 use crate::trace::{Replay, Trace};
@@ -22,6 +22,8 @@ pub struct Params {
     pub ignore: Vec<(usize, usize)>,
     /// 用影子编码（只统计）代替朴素基线
     pub shadow: bool,
+    /// "rd"（M1 编码器）或 "naive"（朴素基线）
+    pub encoder: String,
     pub x264: bool,
     pub x264_kbps: u32,
     pub x264_fps: u32,
@@ -55,7 +57,7 @@ fn diff_px(a: &[u8], b: &[u8], w: usize, ignore: &[(usize, usize)]) -> u64 {
 
 pub fn run_trace(tr: &Trace, p: &Params) -> Result<TraceRun, String> {
     let (w, h) = (tr.w, tr.h);
-    let mut enc: Box<dyn Encoder> = if p.shadow { Box::new(Shadow::new(w, h, p.merge_gap)) } else { Box::new(Naive::new(w, h, p.zstd, p.merge_gap)) };
+    let mut enc: Box<dyn Encoder> = if p.shadow { Box::new(Shadow::new(w, h, p.merge_gap)) } else if p.encoder == "rd" { Box::new(RdEnc::new(w, h)) } else { Box::new(Naive::new(w, h, p.zstd, p.merge_gap)) };
     let mut net = Net::new(p.bw, p.rtt_us, p.jitter_us, p.seed);
     let mut rp = Replay::new(tr);
     let mut a = vec![0u8; w * h * 4];
@@ -123,11 +125,11 @@ pub fn run_trace(tr: &Trace, p: &Params) -> Result<TraceRun, String> {
         }
         let (seq, t) = rp.advance()?.unwrap();
         let t0 = Instant::now();
-        let e = enc.encode(&rp.cur);
+        let e = enc.encode_at(&rp.cur, t as u64);
         enc_ns += t0.elapsed().as_nanos();
         if let Some(wire) = &e.wire {
             let t1 = Instant::now();
-            decode(&mut a, w, h, wire)?;
+            enc.decode(&mut a, w, h, wire)?;
             dec_ns += t1.elapsed().as_nanos();
         }
         let seg = segs.last_mut().unwrap();
@@ -199,10 +201,19 @@ pub fn run_all(traces: &[Trace], p: &Params) -> Result<(Report, Timing, String),
         tims.push(r.timing);
     }
     let summary = summarize(&reps, lat);
+    // 对照：同一批 trace、同一网络参数跑朴素基线（不跑 x264，不重复比对）
+    let baseline = if p.encoder == "rd" && !p.shadow {
+        let mut bp = p.clone(); bp.encoder = "naive".into(); bp.x264 = false;
+        let (mut breps, mut blat) = (Vec::new(), Vec::new());
+        for tr in traces { let r = run_trace(tr, &bp)?; blat.extend(r.lat); breps.push(r.rep); }
+        let b = summarize(&breps, blat);
+        Some(Baseline { encoder: "naive-zstd".into(), bytes_total: b.bytes_total, kb_per_min: b.kb_per_min, first_visit_p90_bytes: b.first_visit_p90_bytes,
+            latency_p90_ms: b.latency.p90_ms, peak_window_bytes_1s: b.peak_window_bytes_1s })
+    } else { None };
     let report = Report {
         schema: 1,
         encoder: encoder.into(),
-        params: p.clone(), summary, traces: reps, placeholders: Placeholders::default(),
+        params: p.clone(), summary, traces: reps, placeholders: Placeholders::default(), baseline,
     };
     let timing = Timing {
         note: "墙钟测量，每次运行都可能不同；不属于 report.json",

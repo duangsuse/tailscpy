@@ -19,7 +19,7 @@ function withBytes<T>(b: Uint8Array, f: (p: number, n: number) => T): T { const 
 const outText = (n: number) => dec.decode(mem().slice(wasm.rd_out_ptr(), wasm.rd_out_ptr() + n))
 function upBytes(msg: any): Uint8Array {
   const n = withBytes(enc.encode(JSON.stringify(msg)), (p, l) => wasm.rd_up_encode(p, l))
-  if (n < 0) throw new Error('Up 编码: ' + outText(-n > 0 ? 0 : 0) + JSON.stringify(msg))
+  if (n < 0) throw new Error('Up 编码: ' + outText(wasm.rd_out_len ? wasm.rd_out_len() : 0) + ' ' + JSON.stringify(msg))
   return mem().slice(wasm.rd_out_ptr(), wasm.rd_out_ptr() + n)
 }
 

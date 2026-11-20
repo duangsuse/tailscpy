@@ -162,6 +162,8 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
             "wire_rt" -> return ok().put("rt", JSONObject(Native.roundtrip(r.getString("kind"), r.get("json").let { if (it is String) JSONObject.quote(it) else it.toString() })))
             "net" -> return ok().put("net", session?.info ?: JSONObject()).put("allow", JSONArray((session?.allow ?: emptySet<String>()).toList())).put("active", session?.active ?: false)
             "net_stats" -> return ok().put("stats", JSONObject(Native.stats()))
+            "va_attach" -> { Native.vaAttach(r.optBoolean("on", true)); return ok() }
+            "va_state" -> return ok().put("va", JSONObject(Native.vaState(r.optBoolean("rows"))))
             "param" -> return ok().put("accepted", Native.param(r.getString("key"), r.getDouble("val")))
             "policy" -> { val s = session ?: return err("网络未启动"); s.allow.clear(); r.optJSONArray("allow")?.let { a -> for (i in 0 until a.length()) s.allow.add(a.getString(i)) }; return ok().put("allow", JSONArray(s.allow.toList())) }
             "mark" -> { rec?.mark(r.getString("name")); return ok() }

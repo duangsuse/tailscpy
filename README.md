@@ -3,7 +3,7 @@
 把 Android 设备（B）上**单个白名单 App** 投到浏览器（A）：A 里点 / 滑 / 返回，B 的画面以单画布回传。目标是在 300–800 KB/s 的 Tailscale 链路上做到文字逐像素锐利、见过的内容来回滚不再下行流量、返回上一页立即出现。
 
 - 规则与总览：[GOAL.md](GOAL.md)（金标准是 [IDEA.md](IDEA.md)），展开文档在 [doc/](doc/)，任务顺序见 [doc/90-tasks.md](doc/90-tasks.md)（含 M0 进度表）。
-- 现在做到 **M0（工具链）**：host（虚拟屏、采集、A11y、注入、设置还原）、人工录制器与回放、语料录制、探针、bench 骨架。传输和 viewer 是 M1 的事。
+- 现在做到 **M1（能看能点）**：WebTransport 传输、基线编码（对 A 的状态求差 + 列掩码行 hash + Fill / Palette / Residual + 基础有损图片）、浏览器查看端（点 / 滑 / 返回 / 打字 / 剪贴板、l 面板、r 遮罩）、白名单与跨包策略、设置还原；M0 的工具链（人工录制器、回放、语料录制、探针、bench）都在。本地滚动、页面缓存是 M2 / M3。
 
 ## 打开录制器
 
@@ -20,6 +20,21 @@ host 没起会自动运行 `host-adb/run.sh`；保存目录默认 `e2e/cases`（
 4. 选已录的 case 点 **回放**，逐步看 ✓/✗、差异比例、录制/回放截图；鼠标悬停步骤列表，右侧大图预览。
 
 产出：`e2e/cases/<用例名>.jsonl` + `<用例名>/NNNN.png`（截图已 gitignore，只有 jsonl 入库）。格式与已知限制见 [e2e/README.md](e2e/README.md)。命令行回放：`node e2e/run.mjs [--repeat 3]`。
+
+## 打开查看端（浏览器看 / 点 B 上的 App）
+
+```sh
+./build.sh                                   # rd.wasm + viewer、libhj_host.so、hj.dex、bench
+host-adb/run.sh 7701 --lan                   # 起 host（UDP 4433 起 WebTransport）；--lan 额外绑私网网卡（默认只绑回环 + tailnet）
+node viewer/serve.mjs 8080 &                 # 开发用静态服务器，页面是 http://localhost:8080/
+adb shell cat /data/local/tmp/hj/url.txt     # B 打印的完整 URL：#b=<地址:端口>&h=<证书 hash>&t=<token>；浏览器打开其中一行
+```
+
+- 右上角下拉框选白名单 App；左键点按 / 长按 / 拖动，**右键或 Esc = 返回**，滚轮透传，键盘打字（输入框有焦点时），Ctrl+C / V / X / A。
+- **l**（或 Alt+L）：三层字节、链路（码率 / RTT / 未确认字节）、全部参数滑块（改了立刻生效）、网络探针按钮；**r**（Alt+R）循环：关 / 最近刷新的矩形 / 图文分层着色。
+- 越界（默认单应用模式：设置里点搜索）会被拦回并提示；`host-adb/run.sh 7701 --lan --allow popup,any` 之类放宽（`popup` = `[popup]` 放行临时窗口，`any` = `*` 允许任意切换并可退回桌面，其余是额外包名；写成 `[popup]` / `*` 会被 adb shell 当 glob）。`--detach-keep 60` 是断线后保留会话的秒数；关掉标签页后超时即关虚拟屏并还原 B 的设置。
+- 命令行当 A：`cargo run --release -p hj_host --example probe -- <地址:端口> <hash> <token> [包名]`（握手并打印 Welcome；带包名则打开会话 5 秒后直接断开）。
+- 证书是 B 自签的 ECDSA P-256，13 天有效，超过 10 天换新（URL 随之变）；浏览器要求 < 14 天。
 
 ## 查看录制结果的统计数据
 
@@ -86,6 +101,9 @@ node e2e/hc.mjs stack                                # 栈深与栈顶 Activity
 node e2e/hc.mjs '{"cmd":"tap","x":540,"y":1066,"settle":{},"stack":true,"shot":true}'
                                                      # 点按 → 等“变化阈值 + 静止” → 栈 → 截图（settle 参数见 doc/60-host.md 实现备注）
 node e2e/hc.mjs '{"cmd":"wheel","x":500,"y":1600,"v":-0.6}'   # 滚轮，v 单位是“格”，精确像素公式见 e2e/lib/wheel.mjs
+node e2e/hc.mjs '{"cmd":"wire","msg":{"Tap":{"page":1,"at":{"region":0,"x":540,"y":1000}}}}'   # 扮演 A：wire 类型的 JSON 形式，和网络来的 Up 同一条处理路径（Open / Tap / Back / Text / Close…）
+node e2e/hc.mjs '{"cmd":"wire_rt","kind":"Up","json":"Back"}'   # JSON → postcard → JSON 往返；wire_log 看最近下发的 Down；net 看 URL；net_stats 看编码统计；va_state 看虚拟 A
+node e2e/hc.mjs '{"cmd":"param","key":"img_q","val":50}'         # 改参数表（同 A 面板里的滑块）；policy 改白名单策略
 node e2e/hc.mjs back | key code=4 | text s=你好 | clipget | viewcfg | close
 node e2e/hc.mjs rec_start dir=/data/local/tmp/hj/rec/x  ...  rec_stop   # 语料录制（80 §3）；也可 host 启动参数 --record <目录>
 ```
@@ -96,6 +114,7 @@ node e2e/hc.mjs rec_start dir=/data/local/tmp/hj/rec/x  ...  rec_stop   # 语料
 
 ```sh
 node e2e/scenario.mjs cold-open                      # 每个白名单 App 跑一遍；也可指定：scroll-down-up com.android.settings
+node e2e/scenario.mjs cold-open --live              # 实跑模式：runner 扮演 A，整条编码→队列→解码链路都走，性质在 A 的画布上查（见下）
 node e2e/scenario.mjs all com.android.settings --rec --twice    # 同时录语料到 ../corpus/trace/<设备>/<包>/<场景>/<批次>/；连跑两次比对
 node e2e/replay.mjs list <trace目录>                 # 事件时间线摘要 + 时间戳单调检查
 node e2e/replay.mjs export <trace目录> <帧号> out.png # 任意一帧导出 PNG（与当时画面一致）
@@ -109,7 +128,7 @@ node e2e/replay.mjs pull <B上目录> <本机目录>
 ```sh
 node e2e/probe.mjs all|p1|p2|p4|p7|p8|jpeg [pkg...]  # 结果写 doc/probe-<设备>.json，汇总见 doc/probe-<设备>.md
 node e2e/probe-md.mjs                                # 由 JSON 重新生成 doc/probe-<设备>.md
-cargo run --release -p bench -- --sample --out /tmp/bench-out    # 合成 trace，免真机
+cargo run --release -p bench -- --sample --out /tmp/bench-out    # 合成 trace，免真机；默认编码器 rd（M1），报表附“与朴素基线对比”和三层字节；--encoder naive 只跑朴素基线
 cargo test -p bench -p rd
 ```
 </details>
@@ -120,9 +139,9 @@ cargo test -p bench -p rd
 | 目录 | 内容 |
 |---|---|
 | `host-adb/` | Kotlin（app_process）：虚拟屏、采集、A11y、注入、设置还原、录制、调试口 |
-| `rd/` | Rust：wire / 编解码 / 页面状态机（两端和 bench 共用；M1 起填） |
-| `host-net/` | Rust：和 rd 链进同一个 .so（M0 只有 JNI 空壳） |
-| `viewer/` | TS + rd.wasm（M0 只有空壳） |
+| `rd/` | Rust：wire（postcard + JSON）、行 hash（列掩码）、Palette / Residual、编码器 `enc.rs`、解码画布 `dec.rs`、参数表、wasm ABI（两端和 bench 共用） |
+| `host-net/` | Rust：和 rd 链进同一个 .so：WebTransport 服务端、编码线程、虚拟 A（实跑模式）、JNI |
+| `viewer/` | TS + rd.wasm：连接、解码、画布、输入、l / r 调试面（`main.ts`，`serve.mjs` 开发服务器） |
 | `bench/` | Rust：帧重放、朴素基线、网络模型、报表、x264 对照 |
 | `e2e/` | JS：调试口客户端、人工录制器、回放、场景 runner、探针 |
 | `cmp-scp/`、`old/`、`old-ov/` | 参考 / 对比用，不要改 |

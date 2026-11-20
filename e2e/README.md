@@ -47,3 +47,11 @@
 - 应用异步加载（例如“网络与互联网”页某行摘要晚到 >300ms）会让静止判定过早：把“静止”调到 500ms 以上。
 - 场景 runner 的 `tap {first:true}` 取“主列表里最上面的可点节点”：设置首页会落到建议卡片上，点一次状态就变，偶尔导致 `enter-back` 失败；这类页面用人工录制（带选择器）更稳。
 - `scroll-down-up` 目前只在首屏有竖直滚动容器、且响应滚轮的 App 上跑（P1：libchecker 精确，设置首页 / activitylauncher 近似）；其余 App 报“跳过”并写明原因。
+
+## 实跑模式（`scenario.mjs --live`）
+
+`node e2e/scenario.mjs cold-open --live`：runner 扮演 A，经调试口 `wire` 发 Up；B 的编码线程把 Down 写进进程内的“虚拟 A”（`host-net/src/va.rs`）用 rd 解码；性质在 **A 的画布**上查（`mark` 取的是 A 画布的每行 hash），另外每个标记点和结束时查：A 画布与 B 当前帧逐像素一致（有损图片除外）、`Verify` 零失败。输出带首屏字节和耗时。
+- 通用场景会点进任意子页，所以默认放行 `[popup]`；场景可用 `policy` 字段覆盖。
+- 某步让 App 退到根页之外（根页 Back → `AppGone`，会话按策略结束）时该场景标“跳过”。
+- `scroll-down-up` 跳过（本地滚动是 M2）。设置、Aggregator News、SAI 的 `enter-back` 通过；LibChecker、圣经、ActivityLauncher、NewPipe、QPython 在**非实跑模式下同样不过**（返回后画面与进入前不同，是 App 自身的不确定，不是编解码：A 与 B 逐像素一致），沿用 M0 的结论。
+

@@ -153,3 +153,9 @@ corpus/
 - **手势确定性**（实测，设置 App）：事件间隔短于一帧或每步位移过大时，同一轨迹两次回放结果不同（14ms/107px 差 5–7%）；重采样成 30ms 间隔、每步 ≤ 60px、终点停 60ms 再抬手后，3 次回放逐像素一致。录制时浏览器只收轨迹、松手后一次性注入，保证“录的就是回放的”。
 - **语料录制器**（`Recorder.kt`，host 的 `rec_start` / `--record`）：`frames.bin` 每条 13 字节头（LE：seq u32、kind u8、rawLen u32、zLen u32）+ zlib 载荷；整帧每 120 帧一个关键帧，其余是变化行段 `[y0 u16 BE, n u16 BE, n 行 RGBA]`；`frames.idx` 每帧 16 字节（seq u32、t u32 ms、offset u64，LE）。树在 A11y 窗口状态 / 内容 / 滚动事件后去抖 250ms 取一棵。读取实现：`e2e/lib/trace.mjs`（已验证导出的帧与当时画面逐像素一致）、`bench/src/trace.rs`。
 - **bench**（`bench/`）：`Encoder` trait + 朴素基线（行 hash 脏带 → zstd）、整数微秒网络模型、`report.json`（无墙钟，两次逐字节相同）+ `timing.json`（墙钟）+ `frames.csv`、x264 对照（ffmpeg，veryfast/zerolatency/threads=1）。M0 未区分回访 / 回滚；离线真值、oracle、消融、白块指标、页面模拟模式留给后续里程碑。
+
+## 实现备注（M1）
+
+- **bench 的 `rd` 编码器**：`bench/src/encoder.rs::RdEnc`（`--encoder rd`，默认）：线上字节 = postcard(Vec<Op>)，Op 名带层标签（`bg/Lit.Palette`），每帧带 `Verify`、A 端解码器重算比对；重放里没有定时器也没有 A11y 提案，所以 `img_defer_ms = 0`、图片按无损。报表新增“三层与省流机制”和“与朴素基线对比”两节（`report.json` 里 `baseline`）。设置 `enter-back` 一份真机录制：rd 720 KB vs 朴素基线 995 KB（−28%），x264 1167 KB，逐像素正确性 7/7。
+- **实跑模式**：`node e2e/scenario.mjs <场景> --live`。runner 经调试口 `wire` 发 Up；B 的编码线程把 `Down` 写进“虚拟 A”（`host-net/src/va.rs`，进程内、不经网络）；runner 在 A 的画布上查场景性质，并查 A 画布与 B 当前帧逐像素一致（有损像素除外）、`Verify` 零失败。`scroll-down-up` 在实跑模式下跳过（本地滚动是 M2）。
+

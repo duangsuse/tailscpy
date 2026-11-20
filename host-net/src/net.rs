@@ -101,8 +101,8 @@ async fn session(conn: wtransport::Connection, core: Arc<Core>) -> Result<(), St
     let id = core.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (tx_tx, mut tx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    let old = core.conn.lock().unwrap().replace(Conn { id, ctl: ctl_tx.clone(), tx: tx_tx, conn: conn.clone() });
-    if let Some(o) = old { let _ = o.ctl.send(frame(&Down::Replaced)); let oc = o.conn.clone(); tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(300)).await; oc.close(VarInt::from_u32(3), b"replaced") }); }
+    let old = core.conn.lock().unwrap().replace(Conn { id, ctl: ctl_tx.clone(), tx: tx_tx, conn: Some(conn.clone()) });
+    if let Some(o) = old { let _ = o.ctl.send(frame(&Down::Replaced)); if let Some(oc) = o.conn.clone() { tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(300)).await; oc.close(VarInt::from_u32(3), b"replaced") }); } }
     core.reset_flow();
 
     // 缓存对齐 M1 固定回 Reset（任务 11）

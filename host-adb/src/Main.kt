@@ -35,7 +35,8 @@ fun main(args: Array<String>) {
     so?.let { try { Native.version(); loaded = true } catch (e: Throwable) { log("libhj_host 不可用: $e") } }
     if (loaded && !noNet) {
         val sess = Session(dbg, pf, a11y, settings); dbg.session = sess
-        allow.split(',').filter { it.isNotBlank() }.forEach { sess.allow.add(it.trim()) }
+        // `[popup]` / `*` 过 adb shell 会被当成 glob：命令行里写 popup / any
+        allow.split(',').filter { it.isNotBlank() }.map { it.trim() }.map { when (it) { "popup" -> "[popup]"; "any" -> "*"; else -> it } }.forEach { sess.allow.add(it) }
         sess.start(File("/data/local/tmp/hj"), netPort, lan, emptyList(), viewer, keepS)
     }
     dbg.serve()
