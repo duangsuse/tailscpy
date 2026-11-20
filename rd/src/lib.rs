@@ -5,6 +5,7 @@
 
 pub mod dec;
 pub mod hash;
+pub mod heuristics;
 pub mod lit;
 pub mod params;
 pub mod region;

@@ -18,5 +18,5 @@ A shell "mkdir -p $D" && A push out/hj.dex $D/ >/dev/null
 SO=; [ -s ../host-net/out/arm64-v8a/libhj_host.so ] && A push ../host-net/out/arm64-v8a/libhj_host.so $D/ >/dev/null && SO="--so $D/libhj_host.so"
 A shell -n "cd $D && (setsid nohup app_process -Djava.class.path=$D/hj.dex /system/bin hj.MainKt --port $PORT $SO $* > $D/log.$PORT.txt 2>&1 < /dev/null & echo \$! > $D/pid.$PORT)"
 A forward tcp:$PORT tcp:$PORT >/dev/null
-for i in {1..40}; do sleep 0.25; PORT=$PORT node ../e2e/hc.mjs ping 2>/dev/null | grep -q "\"ok\":true" && { echo "host 就绪 localhost:$PORT（设备 $S）"; exit 0; }; done
+for i in {1..40}; do sleep 0.25; PORT=$PORT node ../e2e/hc.mjs ping 2>/dev/null | grep -q "\"ok\":true" && { echo "host 就绪 localhost:$PORT（设备 $S）"; sleep 0.3; A shell "cat $D/url.txt 2>/dev/null" | tr -d '\r' | sed 's/^/  查看页 /'; exit 0; }; done
 echo "host 没起来，日志:" >&2; A shell "cat $D/log.$PORT.txt" >&2; exit 1

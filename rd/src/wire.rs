@@ -10,6 +10,9 @@ pub type PageId = u64;
 pub type PgRev = u32;
 pub type Hash = u64;
 
+/// Scroll 画布的 y 原点：Dst.y 是 u32，而向上滚会得到“比起点更小”的内容坐标，所以起点放在 2^20（画布按分块稀疏存储，不占内存）
+pub const ORIGIN: u32 = 1 << 20;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub struct Geom { pub w: u32, pub h: u32, pub dpi: u32 }
 
@@ -140,6 +143,9 @@ pub enum Op {
     Clear { region: u16 },
     Known { region: u16, y_min: i32, y_max: i32, at_top: bool, at_bottom: bool, total_h: Option<u32> },
     Verify { region: u16, y0: u32, y1: u32, fold: Hash },
+    // —— 以下为后加（只追加）——
+    /// 采集头位置：该 Scroll 区域屏幕第一行对应的画布 y。A 在“跟随”状态下据此摆视口
+    Head { region: u16, y: i32 },
 }
 
 impl Op {
@@ -163,7 +169,7 @@ impl Op {
             Op::Fill { .. } => "Fill", Op::Lit { enc: LitEnc::Palette, .. } => "Lit.Palette", Op::Lit { enc: LitEnc::Residual, .. } => "Lit.Residual",
             Op::Lit { .. } => "Lit.Raw", Op::Image { .. } => "Image", Op::SpriteDef { .. } => "SpriteDef", Op::SpriteDrop { .. } => "SpriteDrop",
             Op::Copy { .. } => "Copy", Op::Overlay { .. } => "Overlay", Op::OverlayDrop { .. } => "OverlayDrop", Op::Commit { .. } => "Commit",
-            Op::Clear { .. } => "Clear", Op::Known { .. } => "Known", Op::Verify { .. } => "Verify",
+            Op::Clear { .. } => "Clear", Op::Known { .. } => "Known", Op::Verify { .. } => "Verify", Op::Head { .. } => "Head",
         }
     }
 }
