@@ -2,12 +2,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { decodePng, diffPng } from './png.mjs'
-import { inject } from './steps.mjs'
+import { inject, decodeStep, shotName } from './steps.mjs'
 
 export function loadCase(file) {
-  const ls = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
-  const meta = ls.find(l => l.type === 'meta'); if (!meta) throw new Error(file + ' 没有 meta 行')
-  return { file, dir: path.dirname(file), meta, steps: ls.filter(l => l.type === 'step') }
+  const [meta, ...rest] = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))   // 第 1 行 meta，之后第 i 行 = 第 i 步
+  if (!meta?.pkg) throw new Error(file + ' 第 1 行不是 meta')
+  const name = path.basename(file, '.jsonl')
+  return { file, dir: path.dirname(file), meta, steps: rest.map((l, i) => ({ ...decodeStep(l, i, meta.wait), shot: shotName(name, i) })) }
 }
 
 function findNode(tree, sel, near) {
@@ -22,6 +23,8 @@ function findNode(tree, sel, near) {
   return cands.sort((a, b) => c(a) - c(b))[0]
 }
 
+const SEL_WAIT_MS = 8000
+
 async function replayStep(h, c, s, notes) {
   const wait = s.wait || c.meta.wait
   const settle = { change: wait.change, settle_ms: wait.settle_ms, timeout_ms: wait.timeout_ms, ignore: wait.ignore || [] }
@@ -29,8 +32,14 @@ async function replayStep(h, c, s, notes) {
   if (s.ev === 'tap' || s.ev === 'long') {
     let [x, y] = [s.x, s.y]
     if (s.sel && (s.sel.id || s.sel.text || s.sel.desc)) {
-      const t = await h.ok({ cmd: 'tree', full: false })
-      const n = findNode(t.tree, s.sel, [x, y])
+      // 先等目标节点出现（最多 SEL_WAIT_MS）：open 只等固定时间，录制时人是等首页出来才点的，回放不能在闪屏上就点
+      const t0 = Date.now(); let n = null
+      for (;;) {
+        n = findNode((await h.ok({ cmd: 'tree', full: false })).tree, s.sel, [x, y])
+        if (n || Date.now() - t0 > SEL_WAIT_MS) break
+        await new Promise(r => setTimeout(r, 300))
+      }
+      if (Date.now() - t0 > 400) notes.push(`等选择器 ${Date.now() - t0}ms`)
       if (!n) notes.push('选择器未命中，用录制坐标')
       else {
         const [l, tp, r, b] = n.b, [ol, ot, or, ob] = s.sel.b
@@ -63,9 +72,9 @@ export async function runCase(h, c, { tol = 0.001, outDir, onStep = () => {} } =
     if (d.ratio > tol && s.ev === 'open') notes.push(`open 画面差异 ${(d.ratio * 100).toFixed(3)}%（不判失败）`)
     else if (d.ratio > tol) why.push(`画面不同 ${d.pixels}px (${(d.ratio * 100).toFixed(3)}%) 行 ${d.rows} bbox ${JSON.stringify(d.bbox)}`)
     if (s.stack && r.stack && s.stack.depth !== r.stack.depth) why.push(`栈深 ${r.stack.depth}≠录制 ${s.stack.depth}`)
-    if (s.res && r.settle && s.res.changed !== r.settle.changed) why.push(`变化 ${r.settle.changed}≠录制 ${s.res.changed}`)
+    if (s.res && r.settle && s.ev !== 'open' && !s.wait?.reignored && s.res.changed !== r.settle.changed) why.push(`变化 ${r.settle.changed}≠录制 ${s.res.changed}`)
     if (r.settle && !r.settle.settled) notes.push('未静止(超时)')
-    push(results, { i: s.i, ev: s.ev, ok: !why.length, why: why.join('；'), notes, ms: Date.now() - t0, diff: d.ratio, got: `${name}/${gotName}` })
+    push(results, { i: s.i, ev: s.ev, ok: !why.length, why: why.join('；'), notes, ms: Date.now() - t0, diff: d.ratio, bbox: d.bbox, got: `${name}/${gotName}` })
   }
   return { name, results, shots }
 }

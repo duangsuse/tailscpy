@@ -118,11 +118,12 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
             "quit" -> { closeSession(); quit = true; return ok() }
             "frame" -> {
                 val since = r.optLong("since", -1)
-                if (pf.seq <= since) return ok().put("same", true).put("seq", pf.seq)
+                // since 只在同一块虚拟屏内有效：重开会话后帧序号从头计，客户端带上次见到的 display 来判断
+                if (r.optInt("disp", -2) == pf.displayId && pf.seq <= since) return ok().put("same", true).put("seq", pf.seq).put("display", pf.displayId)
                 if (pf.seq == 0L) return err("还没有帧")
                 val fmt = r.optString("fmt", "png")
                 val (b, seq) = pf.encode(fmt, r.optDouble("scale", 1.0), r.optInt("q", if (fmt == "png") 100 else 70))
-                return ok().put("seq", seq).put("fmt", fmt).put("w", pf.w).put("h", pf.h).put("data", Base64.encodeToString(b, Base64.NO_WRAP))
+                return ok().put("seq", seq).put("display", pf.displayId).put("fmt", fmt).put("w", pf.w).put("h", pf.h).put("data", Base64.encodeToString(b, Base64.NO_WRAP))
             }
             "frame_file" -> {   // 取一帧写到 B 上的文件（PNG），再由调用方 adb pull；大图不走调试口
                 val (b, seq) = pf.encode("png", 1.0, 100)

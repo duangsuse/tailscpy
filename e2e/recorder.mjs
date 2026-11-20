@@ -9,7 +9,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Host, sleep } from './lib/host.mjs'
-import { classify, inject } from './lib/steps.mjs'
+import { classify, inject, encodeStep, decodeStep, shotName } from './lib/steps.mjs'
 import { loadCase, runCase } from './lib/replay.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -42,6 +42,8 @@ async function ensureHost() {
   }
 }
 
+/** B 没设时取 adb 里第一台在线设备（和 host-adb/run.sh 一致），仅用于页面上显示可复制的命令。 */
+const adbSerial = () => { try { return execFileSync('adb', ['devices'], { encoding: 'utf8' }).split('\n').slice(1).map(l => l.split('\t')).find(x => x[1]?.trim() === 'device')?.[0] || '<序列号>' } catch { return '<序列号>' } }
 let session = null    // {pkg, w, h, dpi}
 let g = null          // 进行中的手势 {x,y,tree:Promise}
 const OUTWEB = path.join(here, 'out', 'web')   // 网页回放的逐步截图
@@ -65,27 +67,28 @@ const DRAFT = '.draft'   // 录制中先写草稿；点“保存此重录”才�
 /** 用例名：不含路径分隔符、不以 . 开头（否则会写到 CASES 之外或藏进草稿目录）。可以是中文。 */
 const validName = n => typeof n === 'string' && n.length > 0 && n.length <= 80 && !/[\/\\]/.test(n) && !n.startsWith('.')
 const saveJsonl = () => save(`${DRAFT}/${rec.pkg}.jsonl`, rec.lines.map(l => JSON.stringify(l)).join('\n') + '\n')
-/** 记一步：写 PNG 与 jsonl，返回给网页的描述（截图走 /shots/ 取，不再把 base64 送回去）。 */
+/** 草稿里第 i 步给网页显示用的对象（行 → 内存步骤 + 截图 URL）。 */
+const display = (i, extra = {}) => ({ ...decodeStep(rec.lines[i + 1], i, rec.lines[0].wait), shot: `/shots/${DRAFT}/${shotName(rec.pkg, i)}`, ...extra })
+/** 记一步：写 PNG（草稿目录，文件名由步号推定）与 jsonl（一行一步，第 1 行是 meta）。 */
 function addStep(step, wait) {
-  const i = rec.n++, name = `${rec.pkg}/${String(i).padStart(4, '0')}.png`
-  const { shot, ...rest } = step
-  const file = save(`${DRAFT}/${name}`, Buffer.from(shot, 'base64'))
-  rec.lines.push({ type: 'step', i, ...rest, wait, shot: name })
-  const jsonl = saveJsonl()
-  return { ...rest, i, wait, shot: `/shots/${DRAFT}/${name}`, file, jsonl }
+  const i = rec.n++, { shot, ...rest } = step
+  const file = save(`${DRAFT}/${shotName(rec.pkg, i)}`, Buffer.from(shot, 'base64'))
+  rec.lines.push(encodeStep({ ...rest, wait }, rec.lines[0].wait))
+  return display(i, { file, jsonl: saveJsonl() })
 }
 
 // ── 预览：SSE，有订阅者时轮询 host 取缩放 JPEG（只在帧序号变化时才有数据）──
 const subs = new Set()
 let pumping = false
-let since = -1   // 预览已推送到的帧序号；换 App / 回放时 host 的帧序号从头计，必须清零，否则一直被当作“没有新帧”
+let since = -1, disp = -2   // 预览已推送到的帧序号与所属虚拟屏；换会话后 host 的帧序号从头计，display 变了就不再用旧的 since
 async function pump() {
   if (pumping) return; pumping = true
   while (subs.size) {
     try {
       if (!session) { await sleep(200); continue }
-      const r = await prev.call({ cmd: 'frame', fmt: 'jpeg', scale: 0.5, q: 65, since })
+      const r = await prev.call({ cmd: 'frame', fmt: 'jpeg', scale: 0.5, q: 65, since, disp })
       if (!r.ok) { await sleep(200); continue }
+      disp = r.display
       if (r.same) { await sleep(25); continue }
       since = r.seq
       const msg = `data: ${JSON.stringify({ seq: r.seq, w: r.w, h: r.h, img: r.data })}\n\n`
@@ -121,8 +124,11 @@ const routes = {
   'GET /api/info': async (req, res) => {
     const existing = fs.readdirSync(CASES).filter(f => f.endsWith('.jsonl')).map(f => f.slice(0, -6))
     let host = null; try { const r = await ensureHost(); host = { dev: r.dev, rd: r.rd } } catch (e) { host = { error: e.message } }
-    json(res, { ok: true, cases: CASES, writable: true, existing, host })
+    json(res, { ok: true, cases: CASES, writable: true, existing, host, serial: process.env.B || adbSerial(), hostPort: HOST_PORT, pid: process.pid })
   },
+  // 页面刷新后恢复：正在录的 App 与已记的步骤（草稿在服务端，刷新不丢）
+  'GET /api/state': async (req, res) => json(res, { ok: true, session, running: !!job?.running,
+    rec: rec && { pkg: rec.pkg, steps: Array.from({ length: rec.n }, (_, i) => display(i)), ignore: rec.lines[0].wait?.ignore || [] } }),
   'GET /api/apps': async (req, res) => { await ensureHost(); json(res, await act.call({ cmd: 'apps' })) },
   'POST /api/open': async (req, res) => {
     const { pkg, wait } = await body(req)
@@ -134,8 +140,8 @@ const routes = {
     // open 步骤不等静止帧：固定等 OPEN_WAIT 就截图（首屏常有闪屏 / 走马灯，等静止没有意义）
     const s = await act.call({ cmd: 'settle', settle: OPEN_WAIT, stack: true, shot: true })
     fs.rmSync(path.join(CASES, DRAFT, pkg), { recursive: true, force: true })
-    rec = { pkg, n: 0, lines: [{ v: 1, type: 'meta', pkg, device: info.dev, sdk: info.sdk, w: r.w, h: r.h, dpi: r.dpi, created: new Date().toISOString(), wait }] }
-    const first = addStep({ ev: 'open', res: s.settle, stack: s.stack, shot: s.shot }, { ...OPEN_WAIT, ignore: [] })
+    rec = { pkg, n: 0, lines: [{ v: 2, pkg, device: info.dev, sdk: info.sdk, w: r.w, h: r.h, dpi: r.dpi, created: new Date().toISOString(), wait }] }
+    const first = addStep({ ev: 'open', pkg, res: s.settle, stack: s.stack, shot: s.shot }, OPEN_WAIT)
     json(res, { ok: true, session, first })
   },
   // 回放：用服务端自己的 host 连接跑 lib/replay.mjs（和 e2e/run.mjs 同一份），逐步结果由网页轮询 GET /api/replay
@@ -153,6 +159,20 @@ const routes = {
       .catch(e => { job.error = e.message }).finally(() => { job.running = false })
     json(res, { ok: true, total: c.steps.length })
   },
+  // 回放里失败的步骤多半是异步文字 / 小块动态内容：把那段行带写进**该步骤**的忽略表（只动这一步）。
+  // 区域很大（> 屏幕高度一半）只提示，照常写入：被忽略的步骤回放时不再比较“有无变化”，所以自动跑不会因此假报警。
+  'POST /api/case-ignore': async (req, res) => {
+    const { name, step, range } = await body(req)
+    if (!validName(name) || !Number.isInteger(step) || !Array.isArray(range) || range.length !== 2) return json(res, { ok: false, err: '参数不对' })
+    const file = path.join(CASES, name + '.jsonl')
+    if (!fs.existsSync(file)) return json(res, { ok: false, err: '没有这个 case' })
+    const ls = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))   // ls[0] 是 meta，ls[i+1] 是第 i 步
+    const l = ls[step + 1]; if (!l) return json(res, { ok: false, err: '没有第 ' + step + ' 步' })
+    l.wait = { ...l.wait, ignore: [...(l.wait?.ignore ?? ls[0].wait?.ignore ?? []), range], reignored: true }
+    save(name + '.jsonl', ls.map(x => JSON.stringify(x)).join('\n') + '\n')
+    const frac = (range[1] - range[0]) / ls[0].h
+    json(res, { ok: true, file, big: frac > 0.5, frac })
+  },
   'GET /api/replay': async (req, res) => json(res, { ok: true, job }),
   // 保存此重录：草稿 → 正式 case。name 留空 = 覆盖原来的 <包名>.jsonl；截图目录一并替换。
   'POST /api/save': async (req, res) => {
@@ -165,12 +185,11 @@ const routes = {
     if (!dstDir.startsWith(CASES + path.sep)) return json(res, { ok: false, err: '路径越界' })
     fs.rmSync(dstDir, { recursive: true, force: true })
     let bytes = 0
-    for (const l of rec.lines) if (l.type === 'step') {
-      const n = path.basename(l.shot), data = fs.readFileSync(path.join(CASES, DRAFT, rec.pkg, n))
-      save(`${name}/${n}`, data); bytes += data.length; l.shot = `${name}/${n}`
+    for (let i = 0; i < rec.n; i++) {   // 截图名由步号推定：草稿 <包名>/NNNN.png → 正式 <用例名>/NNNN.png，jsonl 内容不用改
+      const data = fs.readFileSync(path.join(CASES, DRAFT, shotName(rec.pkg, i)))
+      save(shotName(name, i), data); bytes += data.length
     }
     const file = save(name + '.jsonl', rec.lines.map(l => JSON.stringify(l)).join('\n') + '\n')
-    for (const l of rec.lines) if (l.type === 'step') l.shot = `${rec.pkg}/${path.basename(l.shot)}`   // 草稿继续用自己的相对路径
     json(res, { ok: true, name, file, existed, steps: rec.n, bytes })
   },
   'POST /api/close': async (req, res) => { session = null; rec = null; json(res, await act.call({ cmd: 'close' })) },
@@ -178,7 +197,7 @@ const routes = {
   'POST /api/ignore': async (req, res) => {
     const { ignore } = await body(req)
     if (!rec) return json(res, { ok: false, err: '没有正在录制的 App' })
-    rec.lines[0].wait.ignore = ignore; rec.lines[1].wait.ignore = ignore
+    rec.lines[0].wait.ignore = ignore   // 步骤 wait 只存与 meta 不同的键：没写 ignore 的步骤（含 open）自动继承 meta 的
     json(res, { ok: true, jsonl: saveJsonl() })
   },
   // 手势：浏览器在松手时一次性给出整条轨迹，host 按时间轴注入（录制与回放走同一份 lib/steps.mjs，结果可复现）。

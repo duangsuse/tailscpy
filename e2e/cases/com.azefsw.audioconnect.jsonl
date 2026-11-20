@@ -1,0 +1,8 @@
+{"v":2,"pkg":"com.azefsw.audioconnect","device":"motorola motorola razr 40","sdk":35,"w":1080,"h":2640,"dpi":420,"created":"2026-11-20T01:58:26.435Z","wait":{"change":0.005,"settle_ms":500,"timeout_ms":3000,"ignore":[]}}
+{"Open":"com.azefsw.audioconnect","res":{"tChange":377,"tSettle":0,"rows":2428,"volatile":[0,2533]},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"],"wait":{"settle_ms":700,"timeout_ms":700}}
+{"Tap":"@835,223","sel":{"cls":"android.widget.TextView","b":[751,185,869,235],"text":"服务器"},"res":{"tChange":41,"tSettle":770,"rows":1519},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}
+{"Tap":"@100,86","sel":{"cls":"android.widget.ImageButton","b":[0,0,147,147],"desc":"打开抽屉式导航栏"},"res":{"tChange":166,"tSettle":978,"rows":2640},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}
+{"Tap":"@580,399","sel":{"cls":"android.view.View","b":[0,308,788,455]},"res":{"tChange":48,"tSettle":1200,"rows":2640},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}
+{"Back":true,"res":{"tChange":68,"tSettle":879,"rows":2326},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}
+{"Tap":"@63,64","sel":{"cls":"android.widget.ImageButton","b":[0,0,147,147],"desc":"打开抽屉式导航栏"},"res":{"tChange":53,"tSettle":968,"rows":2640},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}
+{"Tap":"@390,399","sel":{"cls":"android.view.View","b":[0,308,788,455]},"res":{"tChange":44,"tSettle":1183,"rows":2640},"stack":[1,"com.azefsw.audioconnect/.ui.main.MainActivity"]}

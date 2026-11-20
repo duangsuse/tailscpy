@@ -1,0 +1,8 @@
+{"v":2,"pkg":"com.miui.calculator","device":"motorola motorola razr 40","sdk":35,"w":1080,"h":2640,"dpi":420,"created":"2026-11-20T02:03:09.023Z","wait":{"change":0.005,"settle_ms":500,"timeout_ms":3000,"ignore":[]}}
+{"Open":"com.miui.calculator","res":{"tChange":224,"tSettle":0,"rows":1453,"volatile":[47,2523]},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"],"wait":{"settle_ms":700,"timeout_ms":700}}
+{"Tap":"@610,107","sel":{"cls":"android.widget.TextView","b":[573,37,683,117],"text":"换算"},"res":{"tChange":57,"tSettle":1052,"rows":1700},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}
+{"Tap":"@231,1158","sel":{"cls":"android.widget.TextView","b":[55,1101,330,1159],"id":"com.miui.calculator:id/txv_title","text":"大写数字"},"res":{"tChange":87,"tSettle":587,"rows":1392},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}
+{"Tap":"@434,1777","sel":{"cls":"android.widget.TextView","b":[315,1694,525,1880],"id":"com.miui.calculator:id/digit_8","text":"8"},"res":{"tChange":9,"tSettle":820,"rows":142},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}
+{"Tap":"@645,1740","sel":{"cls":"android.widget.TextView","b":[553,1694,764,1880],"id":"com.miui.calculator:id/digit_9","text":"9"},"res":{"tChange":1,"tSettle":815,"rows":141},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}
+{"Back":true,"res":{"tChange":60,"tSettle":561,"rows":1391},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}
+{"Tap":"@1003,73","sel":{"cls":"android.widget.ImageView","b":[915,22,1025,132],"id":"com.miui.calculator:id/action_menu_item_child_icon"},"res":{"tChange":5,"tSettle":1065,"rows":786},"stack":[1,"com.miui.calculator/.cal.CalculatorActivity"]}

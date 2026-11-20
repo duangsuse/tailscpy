@@ -1,0 +1,6 @@
+{"v":2,"pkg":"InfinityLoop1309.NewPipeEnhanced","device":"motorola motorola razr 40","sdk":35,"w":1080,"h":2640,"dpi":420,"created":"2026-11-20T02:04:47.128Z","wait":{"change":0.005,"settle_ms":500,"timeout_ms":3000,"ignore":[]}}
+{"Open":"InfinityLoop1309.NewPipeEnhanced","res":{"tChange":273,"tSettle":0,"rows":2640,"volatile":[0,2640]},"stack":[1,"InfinityLoop1309.NewPipeEnhanced/org.schabi.newpipe.MainActivity"],"wait":{"settle_ms":700,"timeout_ms":700}}
+{"Tap":"@515,186","sel":{"cls":"android.widget.LinearLayout","b":[360,147,720,273],"desc":"订阅"},"res":{"tChange":48,"tSettle":738,"rows":2013},"stack":[1,"InfinityLoop1309.NewPipeEnhanced/org.schabi.newpipe.MainActivity"]}
+{"Tap":"@824,232","sel":{"cls":"android.widget.LinearLayout","b":[720,147,1080,273],"desc":"收藏"},"res":{"tChange":48,"tSettle":742,"rows":731},"stack":[1,"InfinityLoop1309.NewPipeEnhanced/org.schabi.newpipe.MainActivity"]}
+{"Tap":"@74,72","sel":{"cls":"android.widget.ImageButton","b":[0,0,147,147],"desc":"打开抽屉"},"res":{"tChange":62,"tSettle":969,"rows":2640},"stack":[1,"InfinityLoop1309.NewPipeEnhanced/org.schabi.newpipe.MainActivity"]}
+{"Tap":"@826,90","sel":{"cls":"android.view.ViewGroup","b":[0,0,1080,147],"id":"InfinityLoop1309.NewPipeEnhanced:id/toolbar"},"res":{"tChange":53,"tSettle":952,"rows":2640},"stack":[1,"InfinityLoop1309.NewPipeEnhanced/org.schabi.newpipe.MainActivity"]}

@@ -1,0 +1,12 @@
+{"v":2,"pkg":"org.qpython.qpy","device":"motorola motorola razr 40","sdk":35,"w":1080,"h":2640,"dpi":420,"created":"2026-11-20T02:06:39.724Z","wait":{"change":0.005,"settle_ms":500,"timeout_ms":3000,"ignore":[]}}
+{"Open":"org.qpython.qpy","res":{"tChange":115,"tSettle":0,"rows":2640,"volatile":[0,2640]},"stack":[1,"org.qpython.qpy/.main.activity.SplashActivity"],"wait":{"settle_ms":700,"timeout_ms":700}}
+{"Tap":"@866,1199","sel":{"cls":"android.widget.ImageView","b":[785,1098,927,1240],"id":"org.qpython.qpy:id/im_editor"},"res":{"tChange":113,"tSettle":0,"rows":2640,"volatile":[158,219]},"stack":[1,"org.qpython.qpy/.texteditor.EditorActivity"]}
+{"Tap":"@91,83","sel":{"cls":"android.widget.ImageButton","b":[0,0,147,147]},"res":{"tChange":76,"tSettle":648,"rows":2640},"stack":[1,"org.qpython.qpy/.main.activity.HomeMainActivity"]}
+{"Tap":"@253,1755","sel":{"cls":"android.widget.ImageView","b":[153,1646,295,1788],"id":"org.qpython.qpy:id/im_file"},"res":{"tChange":194,"tSettle":695,"rows":2640},"stack":[2,"org.qpython.qpy/.texteditor.TedLocalActivity"]}
+{"Tap":"@517,984","sel":{"cls":"android.widget.RelativeLayout","b":[200,937,1038,987],"id":"org.qpython.qpy:id/rl"},"res":{"tChange":54,"tSettle":556,"rows":1067},"stack":[2,"org.qpython.qpy/.texteditor.TedLocalActivity"]}
+{"Back":true,"res":{"tChange":71,"tSettle":572,"rows":1067},"stack":[2,"org.qpython.qpy/.texteditor.TedLocalActivity"]}
+{"Back":true,"res":{"tChange":56,"tSettle":556,"rows":1086},"stack":[2,"org.qpython.qpy/.texteditor.TedLocalActivity"]}
+{"Back":true,"res":{"tChange":53,"tSettle":553,"rows":123},"stack":[2,"org.qpython.qpy/.texteditor.TedLocalActivity"]}
+{"Tap":"@70,118","sel":{"cls":"android.widget.ImageButton","b":[0,0,147,147]},"res":{"tChange":53,"tSettle":632,"rows":2640},"stack":[1,"org.qpython.qpy/.main.activity.HomeMainActivity"]}
+{"Tap":"@879,1797","sel":{"cls":"android.widget.LinearLayout","b":[698,1646,1014,1855],"id":"org.qpython.qpy:id/ll_setting"},"res":{"tChange":166,"tSettle":667,"rows":2640},"stack":[2,"org.qpython.qpy/.main.activity.SettingActivity"]}
+{"Swipe":["@752,2276","@756,1195"],"pts":[[0,752,2276],[30,752,2273],[60,752,2268],[90,757,2226],[120,764,2136],[150,770,2000],[180,770,1881],[210,770,1792],[240,759,1708],[270,759,1642],[300,759,1576],[330,756,1522],[360,756,1469],[390,756,1408],[420,756,1341],[450,756,1295],[480,756,1254],[510,756,1214],[540,756,1197],[570,756,1195],[630,756,1195]],"res":{"tChange":2,"tSettle":777,"rows":1448},"stack":[2,"org.qpython.qpy/.main.activity.SettingActivity"]}

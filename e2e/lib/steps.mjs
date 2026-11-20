@@ -37,3 +37,46 @@ export function inject(h, s, extra, at = [s.x, s.y]) {
     default: throw new Error('未知事件 ' + s.ev)
   }
 }
+
+// ── jsonl 的行格式（磁盘上）↔ 内存里的步骤 ──
+// 第 1 行是 meta；之后第 i 行就是第 i 步（行号推定，不写 type / i / shot；截图是 <用例名>/NNNN.png）。
+//   {"Open":"pkg"}  {"Tap":"@x,y"}  {"Long":"@x,y","ms":700}  {"Swipe":["@x1,y1","@x2,y2"],"pts":[[dt,x,y],…]}  {"Back":true}
+//   附加键：sel（点按命中的节点）、res{tChange,tSettle,rows,volatile}（0 = 没变化 / 没静止）、stack[深度,栈顶]、wait（只写和 meta.wait 不同的键）
+const at = (x, y) => `@${x},${y}`
+const pt = p => p.slice(1).split(',').map(Number)
+
+/** 内存步骤（ev,x,y,…，res 为 host 的 settle 结果）→ 一行。metaWait 用来省掉和 meta 相同的 wait 键。 */
+export function encodeStep(s, metaWait = {}) {
+  const o = {}
+  if (s.ev === 'open') o.Open = s.pkg
+  else if (s.ev === 'tap') o.Tap = at(s.x, s.y)
+  else if (s.ev === 'long') { o.Long = at(s.x, s.y); o.ms = s.ms }
+  else if (s.ev === 'swipe') { o.Swipe = [at(s.x1, s.y1), at(s.x2, s.y2)]; o.pts = s.pts }
+  else if (s.ev === 'back') o.Back = true
+  else throw new Error('未知事件 ' + s.ev)
+  if (s.sel) o.sel = s.sel
+  if (s.res) { const r = s.res; o.res = { tChange: r.changed ? Math.max(1, r.tChange) : 0, tSettle: r.settled ? Math.max(1, r.tSettle) : 0, rows: r.rows, ...(r.volatile && { volatile: r.volatile }) } }
+  if (s.stack) o.stack = [s.stack.depth, s.stack.top]
+  const w = {}; for (const [k, v] of Object.entries(s.wait || {})) if (JSON.stringify(v) !== JSON.stringify(metaWait[k])) w[k] = v
+  if (Object.keys(w).length) o.wait = w
+  return o
+}
+
+/** 一行 → 内存步骤；i = 行号推定的步号。changed / settled 由 tChange / tSettle == 0 推出。 */
+export function decodeStep(l, i, metaWait = {}) {
+  const s = { i }
+  if ('Open' in l) { s.ev = 'open'; s.pkg = l.Open }
+  else if ('Tap' in l) { s.ev = 'tap'; [s.x, s.y] = pt(l.Tap) }
+  else if ('Long' in l) { s.ev = 'long'; [s.x, s.y] = pt(l.Long); s.ms = l.ms }
+  else if ('Swipe' in l) { s.ev = 'swipe'; [s.x1, s.y1] = pt(l.Swipe[0]); [s.x2, s.y2] = pt(l.Swipe[1]); s.pts = l.pts; s.ms = l.pts.at(-1)[0] }
+  else if ('Back' in l) s.ev = 'back'
+  else throw new Error(`第 ${i} 步看不懂：${JSON.stringify(l).slice(0, 80)}`)
+  if (l.sel) s.sel = l.sel
+  if (l.res) s.res = { ...l.res, changed: l.res.tChange !== 0, settled: l.res.tSettle !== 0 }
+  if (l.stack) s.stack = { depth: l.stack[0], top: l.stack[1] }
+  s.wait = { ...metaWait, ...l.wait }
+  return s
+}
+
+/** 步号 → 截图文件名（相对用例目录的上一级，即 <用例名>/NNNN.png）。 */
+export const shotName = (name, i) => `${name}/${String(i).padStart(4, '0')}.png`
