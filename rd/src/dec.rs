@@ -50,6 +50,8 @@ pub struct Canvas {
     /// 右缘滚动条窄带宽度（来自参数表 `sb_w`）：滚动行不含这一带，合成时用左邻列延伸
     pub sb: usize,
     pub view: Vec<u8>,
+    /// 合成后每像素的层（r 遮罩的图 / 文着色）
+    pub view_layer: Vec<u8>,
 }
 
 impl ScrollCanvas {
@@ -84,7 +86,7 @@ impl ScrollCanvas {
 }
 
 impl Canvas {
-    pub fn new(w: usize, h: usize) -> Canvas { Canvas { w, h, px: vec![0; w * h * 4], layer: vec![0; w * h], scroll: None, sb: 0, view: vec![0; w * h * 4] } }
+    pub fn new(w: usize, h: usize) -> Canvas { Canvas { w, h, px: vec![0; w * h * 4], layer: vec![0; w * h], scroll: None, sb: 0, view: vec![0; w * h * 4], view_layer: vec![0; w * h] } }
     pub fn row(&self, y: usize) -> &[u8] { &self.px[y * self.w * 4..(y + 1) * self.w * 4] }
 
     /// 区域列表（`Page` / `Regions`）：有 Scroll 区域就建（矩形变了就重建），没有就撤。
@@ -190,20 +192,20 @@ impl Canvas {
     /// 把 Fixed 画布和视口 `vy`（画布 y，滚动区第一行）处的滚动行合成一帧屏幕，放进 `view`。
     /// 滚动区里没有内容的行用占位色（取上一行已有内容的首像素，没有就深灰）；右缘窄带（`sb`）用左邻列延伸。返回缺行数。
     pub fn compose(&mut self, vy: i32) -> usize {
-        self.view.copy_from_slice(&self.px);
+        self.view.copy_from_slice(&self.px); self.view_layer.copy_from_slice(&self.layer);
         let Some(sc) = self.scroll.as_ref() else { return 0 };
         let (w, rb) = (self.w, self.w * 4); let r = sc.rect;
         let mut missing = 0; let mut ph = [0x30u8, 0x30, 0x30, 255];
         for i in 0..r.h as usize {
             let y = r.y as usize + i; let dst = &mut self.view[y * rb..(y + 1) * rb];
             match sc.row(vy + i as i32, w) {
-                Some((px, _)) => {
-                    dst.copy_from_slice(px);
+                Some((px, lay)) => {
+                    dst.copy_from_slice(px); self.view_layer[y * w..(y + 1) * w].copy_from_slice(lay);
                     let sb = self.sb.min(w.saturating_sub(1));
                     if sb > 0 { let src: [u8; 4] = px[(w - sb - 1) * 4..(w - sb) * 4].try_into().unwrap(); for x in w - sb..w { dst[x * 4..x * 4 + 4].copy_from_slice(&src) } }
                     ph = [px[0], px[1], px[2], 255];
                 }
-                None => { missing += 1; for x in 0..w { dst[x * 4..x * 4 + 4].copy_from_slice(&ph) } }
+                None => { missing += 1; self.view_layer[y * w..(y + 1) * w].fill(0); for x in 0..w { dst[x * 4..x * 4 + 4].copy_from_slice(&ph) } }
             }
         }
         missing

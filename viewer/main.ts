@@ -27,8 +27,9 @@ function upBytes(msg: any): Uint8Array {
 const S: any = {
   w: 0, h: 0, connected: false, editable: false, apps: [] as any[], params: [] as any[], pkg: '', stats: null as any,
   rxBytes: 0, rxWin: [] as [number, number][], txMsgs: 0, verifyFail: 0, applyErr: '', lastSeq: 0, rtt: [] as number[], probe: '', mask: 0, replaced: false,
+  sc: null as any, vy: 0, follow: true, vel: 0, missing: 0, lastUser: 0, lastScrollT: 0, viewSent: 0, imgFail: 0,
 }
-;(window as any).__hj = { S, sendUp: (m: any) => send(m), canvasHash: () => canvasHash() }
+;(window as any).__hj = { S, sendUp: (m: any) => send(m), canvasHash: () => canvasHash(), scrollBy: (dy: number) => userScroll(dy), viewHash: () => viewHash() }
 let cv = $('cv') as HTMLCanvasElement, ctx = cv.getContext('2d')!
 const ov = $('ov') as HTMLCanvasElement, octx = ov.getContext('2d')!
 
@@ -101,12 +102,12 @@ function onDown(body: Uint8Array) {
   if (n < 0) { S.applyErr = outText(0); return }
   const m = JSON.parse(outText(n)); const name = typeof m === 'string' ? m : Object.keys(m)[0]; const v = typeof m === 'string' ? null : m[name]
   switch (name) {
-    case 'Welcome': S.apps = v.apps; S.params = v.params; fillApps(); status('已连接'); backoff = 500; setMsg('选择右上角的 App'); autoOpen(); break
+    case 'Welcome': S.apps = v.apps; S.params = v.params; setSb(); fillApps(); status('已连接'); backoff = 500; setMsg('选择右上角的 App'); autoOpen(); break
     case 'Opened': openCanvas(v.geom.w, v.geom.h); S.pkg = v.pkg; ($('app') as HTMLSelectElement).value = v.pkg; setMsg(''); status(v.pkg); drainEarly(); break
     case 'Focus': S.editable = v.editable; $('foc').textContent = v.editable ? '⌨ 输入中' : ''; break
     case 'Clip': navigator.clipboard.writeText(v.s).catch(() => toast('B 的剪贴板：' + v.s.slice(0, 40) + '（点此复制）', 6000)); break
     case 'Stats': S.stats = v; renderPanel(); break
-    case 'Params': S.params = v.params; renderPanel(); break
+    case 'Params': S.params = v.params; setSb(); renderPanel(); break
     case 'Fault': toast(faultText(v.code, v.msg), 5000); if (v.code === 'AppGone') { setMsg('会话已结束，请重新选择 App'); S.pkg = ''; ($('app') as HTMLSelectElement).value = '' } break
     case 'Replaced': S.replaced = true; setMsg('已在别处打开'); break
     case 'Pong': { const rtt = (performance.now() * 1000 - v.t) / 1000; S.rtt.push(rtt); if (S.rtt.length > 200) S.rtt.shift(); break }
@@ -117,8 +118,9 @@ function faultText(code: string, msg: string) {
     BadToken: 'token 不对', BadVersion: '版本不一致', Busy: 'B 忙' } as any)[code] + (msg ? '：' + msg : '')
 }
 
+function setSb() { const q = S.params.find((x: any) => x.key === 'sb_w'); if (q && S.w) wasm.rd_set_sb(q.val) }
 function openCanvas(w: number, h: number) {
-  S.w = w; S.h = h; wasm.rd_canvas_init(w, h)
+  S.w = w; S.h = h; wasm.rd_canvas_init(w, h); S.sc = null; S.vy = 0; S.follow = true; setSb()
   cv.width = ov.width = w; cv.height = ov.height = h
   const wrap = $('wrap'); const fit = () => { const st = $('stage'); const s = Math.min(st.clientWidth / w, st.clientHeight / h); wrap.style.width = w * s + 'px'; wrap.style.height = h * s + 'px'; S.scale = s; renderPanel() }
   fit(); (window as any).onresize = fit
@@ -132,9 +134,9 @@ async function applyTx(body: Uint8Array) {
   const n = withBytes(body, (p, l) => wasm.rd_down_apply(p, l))
   if (n < 0) { S.applyErr = outText(0); send({ Resync: { page: 1 } }); return }
   const m = JSON.parse(outText(n)); const t = m.Tx
-  if (!t) { return }   // Page 等
+  if (!t) { refreshScroll(); scheduleRender(); return }   // Page / Regions 等
   S.txMsgs++; S.lastSeq = t.seq
-  for (const r of t.rects) { addDirty(r.x, r.y, r.w, r.h); if (r.k !== 'Verify') flashes.push({ ...r, t: performance.now() }) }
+  for (const r of t.rects) { if (r.r === 0) addDirty(r.x, r.y, r.w, r.h); flashes.push({ ...r, t: performance.now() }) }
   if (t.verify_fail.length) { S.verifyFail += t.verify_fail.length; console.warn('校验失败', t.verify_fail) }
   // 有损图片：wasm 不带 JPEG 解码，浏览器原生解（createImageBitmap）后写回画布
   for (const im of t.images) {
@@ -144,26 +146,24 @@ async function applyTx(body: Uint8Array) {
       const bmp = await createImageBitmap(new Blob([jpg], { type: 'image/jpeg' }))
       const oc = new OffscreenCanvas(im.w, im.h); const c2 = oc.getContext('2d')!; c2.drawImage(bmp, 0, 0, im.w, im.h)
       const px = c2.getImageData(0, 0, im.w, im.h).data
-      withBytes(new Uint8Array(px.buffer), (pp) => wasm.rd_put_rgba(im.x, im.y, im.w, im.h, pp))
-    } catch (e) { console.warn('图片解码失败', e) }
+      withBytes(new Uint8Array(px.buffer), (pp) => wasm.rd_put_rgba(im.r, im.x, im.y, im.w, im.h, pp))
+    } catch (e) { S.imgFail++; console.warn('图片解码失败', e) }
   }
   send({ Ack: { seq: t.seq } })
-  scheduleRender()
+  refreshScroll(); scheduleRender()
 }
 function addDirty(x: number, y: number, w: number, h: number) {
   if (!dirty) dirty = [x, y, x + w, y + h]; else { dirty[0] = Math.min(dirty[0], x); dirty[1] = Math.min(dirty[1], y); dirty[2] = Math.max(dirty[2], x + w); dirty[3] = Math.max(dirty[3], y + h) }
 }
 let rafPending = false
 function scheduleRender() { if (!rafPending) { rafPending = true; requestAnimationFrame(render) } }
+const img = () => new ImageData(new Uint8ClampedArray(wasm.memory.buffer, S.sc ? wasm.rd_view_ptr() : wasm.rd_canvas_ptr(), S.w * S.h * 4), S.w, S.h)
 function render() {
   rafPending = false
-  if (dirty && S.w) {
-    const [x0, y0, x1, y1] = dirty; dirty = null
-    const img = new ImageData(new Uint8ClampedArray(wasm.memory.buffer, wasm.rd_canvas_ptr(), S.w * S.h * 4), S.w, S.h)
-    ctx.putImageData(img, 0, 0, x0, y0, x1 - x0, y1 - y0)
-    if (S.mask === 2) drawLayers()
-  }
-  drawFlashes()
+  if (!S.w) return
+  if (S.sc) { S.missing = wasm.rd_compose(Math.round(S.vy)); ctx.putImageData(img(), 0, 0); dirty = null }
+  else if (dirty) { const [x0, y0, x1, y1] = dirty; dirty = null; ctx.putImageData(img(), 0, 0, x0, y0, x1 - x0, y1 - y0) }
+  drawOverlay()
 }
 function canvasHash(): string {   // 测试用：整个画布的快速摘要
   if (!S.w) return ''
@@ -171,23 +171,94 @@ function canvasHash(): string {   // 测试用：整个画布的快速摘要
   for (let i = 0; i < b.length; i += 97) h = Math.imul(h ^ b[i], 16777619) >>> 0
   return h.toString(16)
 }
+function viewHash(): string {   // 测试用：当前显示的画面（含本地滚动后的合成）
+  if (!S.w) return ''
+  if (S.sc) wasm.rd_compose(Math.round(S.vy))
+  const b = new Uint8Array(wasm.memory.buffer, S.sc ? wasm.rd_view_ptr() : wasm.rd_canvas_ptr(), S.w * S.h * 4); let h = 2166136261 >>> 0
+  for (let i = 0; i < b.length; i += 97) h = Math.imul(h ^ b[i], 16777619) >>> 0
+  return h.toString(16)
+}
 
-// ───────── r 遮罩 ─────────
+// ───────── Scroll 区域：本地滚动（30 §2）─────────
+function refreshScroll() {
+  const n = wasm.rd_scroll_info()
+  if (n < 0) { S.sc = null; return }
+  const o = JSON.parse(outText(n)); const first = !S.sc || S.sc.rect.join() !== o.rect.join()
+  S.sc = { rect: o.rect, head: o.head, ymin: o.y_min, ymax: o.y_max, atTop: o.at_top, atBot: o.at_bottom }
+  if (first) { S.vy = o.head; S.follow = true }
+  else if (S.follow) S.vy = o.head
+  else if (Math.abs(S.vy - o.head) < 1 && performance.now() - S.lastUser > 300) S.follow = true   // B 追上了，且用户停手一会儿：恢复跟随
+}
+function clampVy(v: number) {
+  const s = S.sc; if (!s) return v
+  // 到顶 / 到底就停在已知边缘；否则最多比已知范围多滚一屏（B 的采集头要追，滚太远只会一片占位）
+  const rh = s.rect[3]
+  const lo = s.atTop ? s.ymin : s.ymin - rh, hi = s.atBot ? s.ymax - rh : s.ymax
+  return Math.min(Math.max(v, lo), Math.max(hi, lo))
+}
+function sendView() {   // 视口变了就上报（只保留最新值，≤ 每 30 ms 一次）
+  if (!S.sc) return
+  const now = performance.now(); if (now - S.viewSent < 30) { setTimeout(sendView, 30 - (now - S.viewSent)); return }
+  S.viewSent = now; send({ View: { page: 1, region: 1, y: Math.round(S.vy), vy: S.vel } })
+}
+function userScroll(dy: number) {   // dy：设备像素，正 = 内容上移（往下滚）
+  if (!S.sc) return
+  S.follow = false; S.lastUser = S.lastScrollT = performance.now()
+  S.vy = clampVy(S.vy + dy); sendView(); scheduleRender()
+}
+let fling = 0
+function startFling(v: number) {   // v：像素 / ms
+  cancelAnimationFrame(fling); if (Math.abs(v) < 0.05) return
+  let last = performance.now()
+  const step = (t: number) => {
+    const dt = Math.min(50, t - last); last = t; const before = S.vy   // 标签页在后台时 rAF 停摆，回来第一帧 dt 很大
+    S.vy = clampVy(S.vy + v * dt); v *= Math.pow(0.995, dt)   // 摩擦
+    S.lastUser = S.lastScrollT = t; sendView(); scheduleRender()
+    if (Math.abs(v) < 0.03 || S.vy === before) { S.vel = 0; return }
+    S.vel = v; fling = requestAnimationFrame(step)
+  }
+  fling = requestAnimationFrame(step)
+}
+const inScrollY = (p: { x: number, y: number }) => !!S.sc && p.y >= S.sc.rect[1] && p.y < S.sc.rect[1] + S.sc.rect[3]
+const inScroll = (p: { x: number, y: number }) => inScrollY(p) && p.x < S.w - 56
+const onThumbTrack = (p: { x: number, y: number }) => inScrollY(p) && p.x >= S.w - 56   // 右缘一条：拖自绘滚动条（本地跳转，30 §2）
+function thumbTo(py: number) {   // 指针 y（设备像素）→ 视口：在已知范围内按比例跳
+  const s = S.sc; if (!s) return; const [, ry, , rh] = s.rect; const range = Math.max(s.ymax - s.ymin, rh); if (range <= rh) return
+  const th = Math.max(48, rh * rh / range); const f = Math.min(1, Math.max(0, (py - ry - th / 2) / (rh - th)))
+  S.follow = false; S.lastUser = S.lastScrollT = performance.now(); S.vy = clampVy(s.ymin + f * (range - rh)); sendView(); scheduleRender()
+}
+
+// ───────── r 遮罩 + 自绘滚动条 ─────────
 const KC: any = { Fill: '#4cf', 'Lit.Palette': '#4f8', 'Lit.Residual': '#fd4', 'Lit.Raw': '#f84', Image: '#f4c', Copy: '#fa4', Overlay: '#8f4' }
-function drawFlashes() {
-  if (S.mask !== 1) { if (S.mask !== 2) octx.clearRect(0, 0, S.w, S.h); return }
-  octx.clearRect(0, 0, S.w, S.h); const now = performance.now()
-  for (let i = flashes.length - 1; i >= 0; i--) { const f = flashes[i], a = 1 - (now - f.t) / 1500; if (a <= 0) { flashes.splice(i, 1); continue }
-    octx.globalAlpha = a; octx.strokeStyle = KC[f.k] || '#fff'; octx.lineWidth = 4; octx.strokeRect(f.x + 2, f.y + 2, f.w - 4, f.h - 4) }
-  octx.globalAlpha = 1
-  if (flashes.length) scheduleRender()
+function toScreenY(r: any) { return r.r === 1 && S.sc ? r.y - Math.round(S.vy) + S.sc.rect[1] : r.y }
+function drawOverlay() {
+  octx.clearRect(0, 0, S.w, S.h)
+  if (S.mask === 2) drawLayers()
+  if (S.mask === 1) {
+    const now = performance.now()
+    for (let i = flashes.length - 1; i >= 0; i--) { const f = flashes[i], a = 1 - (now - f.t) / 1500; if (a <= 0) { flashes.splice(i, 1); continue }
+      const y = toScreenY(f); if (y + f.h < 0 || y > S.h) continue
+      octx.globalAlpha = a; octx.strokeStyle = KC[f.k] || '#fff'; octx.lineWidth = 4; octx.strokeRect(f.x + 2, y + 2, f.w - 4, f.h - 4) }
+    octx.globalAlpha = 1
+    if (flashes.length) scheduleRender()
+  }
+  // 自绘滚动条：按已知范围显示位置，停手 1 s 后淡出
+  const s = S.sc
+  if (s) { const age = performance.now() - S.lastScrollT, a = Math.max(0, Math.min(1, 1.5 - age / 700))
+    if (a > 0) {
+      const [, ry, , rh] = s.rect; const range = Math.max(s.ymax - s.ymin, rh); const th = Math.max(48, rh * rh / range)
+      const pos = range > rh ? Math.min(1, Math.max(0, (S.vy - s.ymin) / (range - rh))) : 0
+      octx.globalAlpha = a * 0.7; octx.fillStyle = '#ddd'; octx.fillRect(S.w - 14, ry + pos * (rh - th), 8, th); octx.globalAlpha = 1
+      if (a < 1) scheduleRender()
+    } }
 }
-function drawLayers() {   // 图 / 文 / 视三类区：按每个像素最后一次写入的层着色（bg 绿、lit 紫）
-  const l = new Uint8Array(wasm.memory.buffer, wasm.rd_layer_ptr(), S.w * S.h); const img = octx.createImageData(S.w, S.h); const d = new Uint32Array(img.data.buffer)
+function drawLayers() {   // 图 / 文 / 视三类区：按每个像素最后一次写入的层着色（bg 绿、lit 紫）；滚动区按当前视口合成
+  if (S.sc) wasm.rd_compose(Math.round(S.vy))
+  const l = new Uint8Array(wasm.memory.buffer, S.sc ? wasm.rd_view_layer_ptr() : wasm.rd_layer_ptr(), S.w * S.h); const im = octx.createImageData(S.w, S.h); const d = new Uint32Array(im.data.buffer)
   for (let i = 0; i < l.length; i++) d[i] = l[i] === 1 ? 0x3c40ff40 : l[i] === 2 ? 0x50ff40ff : 0
-  octx.putImageData(img, 0, 0)
+  octx.putImageData(im, 0, 0)
 }
-function setMask(m: number) { S.mask = m; octx.clearRect(0, 0, S.w, S.h); if (m === 2) drawLayers(); if (m === 1) scheduleRender(); toast(['遮罩：关', '遮罩：最近刷新的矩形（蓝=Fill 绿=调色板 黄=残差 紫=图片）', '遮罩：图/文分层（绿=无损 紫=有损图片）'][m]) }
+function setMask(m: number) { S.mask = m; scheduleRender(); toast(['遮罩：关', '遮罩：最近刷新的矩形（蓝=Fill 绿=调色板 黄=残差 紫=图片 橙=搬移）', '遮罩：图/文分层（绿=无损 紫=有损图片）'][m]) }
 
 // ───────── App 选择 ─────────
 function fillApps() {
@@ -205,34 +276,54 @@ const pos = (e: MouseEvent) => { const r = wrap.getBoundingClientRect(); return 
 let down: any = null
 const LONG_MS = 500, SLOP = 8
 wrap.addEventListener('contextmenu', e => e.preventDefault())
+// 内容坐标：Scroll 区域里的点 y 是画布 y（视口 + 屏幕行），其余是屏幕坐标
+const atOf = (p: { x: number, y: number }) => inScroll(p) ? { region: 1, x: p.x, y: Math.round(Math.round(S.vy) + (p.y - S.sc.rect[1])) } : { region: 0, x: p.x, y: p.y }
 wrap.addEventListener('pointerdown', e => {
   $('ime').focus()
   if (!S.w || !S.connected) return
   if (e.button === 2) { send('Back'); return }
   if (e.button !== 0) return
+  cancelAnimationFrame(fling); S.vel = 0
   wrap.setPointerCapture(e.pointerId)
-  const p = pos(e)
-  down = { x: e.clientX, y: e.clientY, p, drag: false, long: false, dot: dot(e) }
-  down.timer = setTimeout(() => { if (down && !down.drag) { down.long = true; send({ LongPress: { page: 1, at: p } }) } }, LONG_MS)
+  const p = pos(e), local = inScroll(p)
+  if (onThumbTrack(p)) { down = { thumb: true, dot: dot(e) }; thumbTo(p.y); return }
+  down = { x: e.clientX, y: e.clientY, p, at: atOf(p), drag: false, scroll: false, long: false, local, dot: dot(e), samples: [[performance.now(), e.clientY]] }
+  down.timer = setTimeout(() => { if (down && !down.drag && !down.scroll) { down.long = true; send({ LongPress: { page: 1, at: down.at } }) } }, LONG_MS)
 })
 wrap.addEventListener('pointermove', e => {
   if (!down) return
-  if (!down.drag && Math.hypot(e.clientX - down.x, e.clientY - down.y) > SLOP && !down.long) {
-    down.drag = true; clearTimeout(down.timer); send({ Touch: { page: 1, phase: 0, at: down.p, dt: 0 } }); down.t = performance.now()
+  if (down.thumb) { thumbTo(pos(e).y); return }
+  const dx = e.clientX - down.x, dyc = e.clientY - down.y
+  if (!down.drag && !down.scroll && Math.hypot(dx, dyc) > SLOP && !down.long) {
+    clearTimeout(down.timer)
+    if (down.local && Math.abs(dyc) >= Math.abs(dx)) { down.scroll = true; down.lastY = down.y }   // 竖直为主 → 本地滚动（带惯性）
+    else { down.drag = true; send({ Touch: { page: 1, phase: 0, at: down.p, dt: 0 } }); down.t = performance.now() }
   }
-  if (down.drag) { const now = performance.now(); send({ Touch: { page: 1, phase: 1, at: pos(e), dt: Math.round(now - down.t) } }); down.t = now }
+  if (down.scroll) {
+    const sc = 1 / (S.scale || 1); userScroll(-(e.clientY - down.lastY) * sc); down.lastY = e.clientY
+    down.samples.push([performance.now(), e.clientY]); if (down.samples.length > 6) down.samples.shift()
+  } else if (down.drag) { const now = performance.now(); send({ Touch: { page: 1, phase: 1, at: pos(e), dt: Math.round(now - down.t) } }); down.t = now }
 })
 wrap.addEventListener('pointerup', e => {
   if (!down) return
+  if (down.thumb) { setTimeout(() => down?.dot?.remove(), 0); down = null; return }
   clearTimeout(down.timer)
-  if (down.drag) send({ Touch: { page: 1, phase: 2, at: pos(e), dt: Math.round(performance.now() - down.t) } })
-  else if (!down.long) send({ Tap: { page: 1, at: down.p } })
+  if (down.scroll) {
+    const s = down.samples, a = s[0], b = s[s.length - 1]; const dt = b[0] - a[0]
+    if (dt > 0 && performance.now() - b[0] < 80) startFling(-((b[1] - a[1]) / dt) / (S.scale || 1))
+  } else if (down.drag) send({ Touch: { page: 1, phase: 2, at: pos(e), dt: Math.round(performance.now() - down.t) } })
+  else if (!down.long) send({ Tap: { page: 1, at: down.at } })
   setTimeout(() => down?.dot?.remove(), 0); down = null
 })
 function dot(e: PointerEvent) { const d = document.createElement('div'); const r = wrap.getBoundingClientRect()
   d.style.cssText = `position:absolute;width:20px;height:20px;border-radius:50%;background:#fff6;left:${e.clientX - r.left - 10}px;top:${e.clientY - r.top - 10}px;pointer-events:none`
   wrap.appendChild(d); setTimeout(() => d.remove(), 600); return d }   // 按下反馈：短暂的圆点
-wrap.addEventListener('wheel', e => { e.preventDefault(); if (!S.w) return; send({ Wheel: { page: 1, at: pos(e), dx: e.deltaX / 100, dy: e.deltaY / 100 } }) }, { passive: false })
+wrap.addEventListener('wheel', e => {
+  e.preventDefault(); if (!S.w) return
+  const p = pos(e)
+  if (inScroll(p) && e.deltaX === 0) { cancelAnimationFrame(fling); userScroll(e.deltaY / (S.scale || 1)); return }   // 滚动区里的滚轮：本地滚动，B 的采集头去追
+  send({ Wheel: { page: 1, at: atOf(p), dx: e.deltaX / 100, dy: e.deltaY / 100 } })
+}, { passive: false })
 
 const KEYS: any = { Enter: 66, Backspace: 67, Tab: 61, ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22, Delete: 112, Home: 122, End: 123, PageUp: 92, PageDown: 93, Space: 62 }
 const ime = $('ime') as HTMLTextAreaElement
@@ -277,7 +368,8 @@ function renderPanel() {
     <div class="row"><span>编码耗时(最近/累计)</span><span>${(X.enc_ms ?? 0).toFixed(1)} / ${(X.enc_ms_total ?? 0).toFixed(0)} ms</span></div>
     <div class="row"><span>未确认字节</span><span>${fmtB(X.inflight ?? 0)}</span></div>
     <div class="row"><span>RTT 中位/P95</span><span>${pct(S.rtt, .5).toFixed(0)} / ${pct(S.rtt, .95).toFixed(0)} ms</span></div>
-    <div class="row"><span>校验失败</span><span>${S.verifyFail}</span></div>
+    <div class="row"><span>校验失败 / 图片解码失败</span><span>${S.verifyFail} / ${S.imgFail}</span></div>
+    ${S.sc ? `<h4>滚动区</h4><div class="row"><span>区域 y / 高</span><span>${S.sc.rect[1]} / ${S.sc.rect[3]}</span></div><div class="row"><span>采集头 / 视口</span><span>${S.sc.head - 1048576} / ${Math.round(S.vy) - 1048576}${S.follow ? '（跟随）' : ''}</span></div><div class="row"><span>已知范围</span><span>${S.sc.ymin - 1048576} … ${S.sc.ymax - 1048576}</span></div><div class="row"><span>到顶 / 到底 / 缺行</span><span>${S.sc.atTop ? '是' : '否'} / ${S.sc.atBot ? '是' : '否'} / ${S.missing}</span></div>` : ''}
     <div class="row"><span>显示缩放</span><span>${((S.scale || 0) * 100).toFixed(0)}%${S.scale && S.scale !== 1 ? '（非 1:1，文字会被重采样）' : ''}</span></div>
     <div><button id="pr">网络探针 P5</button> <span>${S.probe}</span></div>
     <h4>参数</h4>${ctl}<h4>操作</h4><button id="rc">断开重连</button>`

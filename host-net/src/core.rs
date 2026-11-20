@@ -57,9 +57,17 @@ pub struct Core {
     pub last_push: Mutex<Instant>,
     pub deferring: std::sync::atomic::AtomicBool,
     pub va: Mutex<Option<crate::va::VaState>>,
+    /// A 报的视口（画布 y）：采集头要追上它
+    pub view: Mutex<Option<i32>>,
+    pub req: Mutex<Option<ScrollReq>>,
+    /// 滚轮因子（像素 / 格），按实测位移自学（因容器而异：RecyclerView 168，设置首页的 ScrollView 约 357）
+    pub wheel_f: Mutex<f64>,
 }
 
 pub const PAGE: PageId = 1;
+
+/// 采集头调度发出的一次滚动请求（等帧里出现位移才算响应）
+pub struct ScrollReq { pub t: Instant, pub notches: f64, pub step: i32 }
 
 impl Core {
     pub fn new(token: String) -> Arc<Core> {
@@ -68,7 +76,7 @@ impl Core {
             up_tx, up_rx: Mutex::new(up_rx), params: Mutex::new(Params::new()), apps: Mutex::new(vec![]), token,
             conn: Mutex::new(None), conn_seq: AtomicU64::new(0), enc: Mutex::new(None), frame: Mutex::new(Frame { buf: vec![], w: 0, h: 0 }),
             work: Mutex::new(Work::default()), cv: Condvar::new(), tx_seq: AtomicU64::new(0), sent: AtomicU64::new(0), acked: AtomicU64::new(0),
-            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None),
+            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None), view: Mutex::new(None), req: Mutex::new(None), wheel_f: Mutex::new(168.0),
         })
     }
 
@@ -136,6 +144,65 @@ impl Core {
             && self.last_push.lock().unwrap().elapsed() >= Duration::from_millis(250)
     }
 
+    pub fn set_view(&self, y: i32) { *self.view.lock().unwrap() = Some(y); self.kick() }
+
+    /// 采集头调度（30 §3）：让 B 的滚动位置追上 A 的视口。每次一小步（≤ 区域高度的 60%，保证相邻两帧有足够重叠供位移检测），
+    /// 一次只有一个在途请求；用滚轮精确公式 `v = (N + 0.5) / F`，F 由实测位移自学。
+    pub fn drive_scroll(&self, shift: i32) {
+        let mut g = self.enc.lock().unwrap();
+        let Some(enc) = g.as_mut() else { return };
+        let Some((head, rect)) = enc.scroll_head() else { return };
+        let mut req = self.req.lock().unwrap();
+        if let Some(r) = req.as_ref() {
+            if shift != 0 {
+                let mut f = self.wheel_f.lock().unwrap();
+                *f = rd::heuristics::update_wheel_factor(*f, r.notches.abs(), r.step as f64, shift as f64);
+                *req = None;
+            } else if r.t.elapsed() > Duration::from_millis(300) { enc.expect_timeout(); *req = None } else { return }
+        }
+        let Some(ty) = *self.view.lock().unwrap() else { return };
+        let diff = ty as i64 - head;
+        if diff == 0 { return }
+        let (top, bot) = enc.scroll_edges();
+        if (diff > 0 && bot) || (diff < 0 && top) { return }
+        let max = (rect.h as i64 * 6 / 10).max(8);
+        let step = diff.clamp(-max, max) as i32;
+        let f = *self.wheel_f.lock().unwrap();
+        let notches = (step.abs() as f64 + 0.5) / f * step.signum() as f64;
+        enc.set_expect(Some(step));
+        *req = Some(ScrollReq { t: Instant::now(), notches, step });
+        self.up_event(format!("{{\"ev\":\"scroll\",\"x\":{},\"y\":{},\"notches\":{:.5}}}", self.frame.lock().unwrap().w / 2, rect.y + rect.h / 2, notches));
+    }
+
+    /// 点击换算与点前校验（30 §6、10 §5）：内容坐标 y → 屏幕 y。该内容行 A 有的 hash 必须等于 B 屏幕上现在那一行，否则 Stale（不点）。
+    /// B 的采集头还没追上视口时最多等 `wait_ms`。返回 JSON：{ok:true, sy} / {ok:false, why:"stale|offscreen|unknown"}
+    pub fn resolve_tap(&self, cy: i64, wait_ms: u64) -> serde_json::Value {
+        let t0 = Instant::now();
+        loop {
+            let r = {
+                let g = self.enc.lock().unwrap();
+                let Some(enc) = g.as_ref() else { return serde_json::json!({"ok": false, "why": "nosession"}) };
+                match (enc.scroll_head(), enc.scroll_mask()) {
+                    (Some((head, rect)), Some(mask)) => {
+                        let sy = rect.y as i64 + (cy - head);
+                        if sy < rect.y as i64 || sy >= (rect.y + rect.h) as i64 { Err("offscreen") }
+                        else {
+                            let Some(have) = enc.scroll_known(cy) else { return serde_json::json!({"ok": false, "why": "unknown"}) };
+                            let f = self.frame.lock().unwrap(); let rb = f.w * 4;
+                            let now = rd::hash::row_hash_masked(&f.buf[sy as usize * rb..(sy as usize + 1) * rb], &mask);
+                            if now == have { Ok(sy) } else { Err("stale") }
+                        }
+                    }
+                    _ => return serde_json::json!({"ok": false, "why": "noscroll"}),
+                }
+            };
+            match r {
+                Ok(sy) => return serde_json::json!({"ok": true, "sy": sy}),
+                Err(why) => { if t0.elapsed() >= Duration::from_millis(wait_ms) { return serde_json::json!({"ok": false, "why": why}) } std::thread::sleep(Duration::from_millis(25)) }
+            }
+        }
+    }
+
     pub fn end(&self) { *self.enc.lock().unwrap() = None }
 
     pub fn stats_down(&self) -> Down {
@@ -189,13 +256,15 @@ pub fn encoder_loop(core: Arc<Core>) {
         // 3. 编
         let p = core.params.lock().unwrap().clone();
         let t = Instant::now();
-        let (ops, rows, defer) = {
+        let (ops, rows, defer, regions, shift) = {
             let mut g = core.enc.lock().unwrap();
             let Some(enc) = g.as_mut() else { continue };
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
-            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer)
+            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy)
         };
         let more = defer; core.deferring.store(more, Ordering::Relaxed);
+        core.drive_scroll(shift);
+        if let Some(rs) = regions { let seq = core.next_seq(); core.send_tx(seq, &Down::Regions { seq, page: PAGE, regions: rs }); }
         if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } continue }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         // 4. 统计（逐 Op 的线上字节）

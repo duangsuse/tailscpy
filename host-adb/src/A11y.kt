@@ -139,6 +139,24 @@ class A11y {
         return out
     }
 
+    /**
+     * Scroll 区域提案 [x,y,w,h]（20 §3）：虚拟屏上面积最大的、可见的纵向滚动节点。
+     * 排除横向容器（HorizontalScrollView、ViewPager 一类的 cls / id）；设置首页是整屏 ScrollView，NewPipe 是 ViewPager 里的 GridView。
+     */
+    fun scrollRegion(display: Int): JSONArray {
+        var best: Rect? = null; var bestA = 0
+        fun walk(n: AccessibilityNodeInfo, d: Int) {
+            val cls = n.className?.toString() ?: ""; val id = n.viewIdResourceName ?: ""
+            if (n.isScrollable && n.isVisibleToUser && !Regex("Horizontal|Pager", RegexOption.IGNORE_CASE).containsMatchIn(cls + id)) {
+                val r = Rect(); n.getBoundsInScreen(r); val a = r.width() * r.height()
+                if (r.height() >= 200 && a > bestA) { bestA = a; best = r }
+            }
+            if (d < 40) for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, d + 1) }
+        }
+        for (w in windowsOn(display)) w.root?.let { walk(it, 0) }
+        return best?.let { JSONArray().put(it.left).put(it.top).put(it.width()).put(it.height()) } ?: JSONArray()
+    }
+
     /** 节点树摘要（每行一个有意义的节点），调试口打印用。 */
     fun brief(tree: JSONObject): String {
         val sb = StringBuilder()

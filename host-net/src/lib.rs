@@ -103,6 +103,22 @@ pub extern "system" fn Java_hj_Native_hints(mut env: JNIEnv, _c: JClass, json: J
     c.kick();   // 提案晚到：已按无损发出的照片要改发 JPEG，压后的条带也可以放行了
 }
 
+/// A11y 的 Scroll 区域提案：`[x,y,w,h]` 或 `[]`
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_scrollRegion(mut env: JNIEnv, _c: JClass, json: JString) {
+    let j = s(&mut env, &json);
+    let Some(c) = core() else { return };
+    let r = serde_json::from_str::<Vec<u32>>(&j).ok().filter(|v| v.len() == 4).map(|v| Rect { x: v[0], y: v[1], w: v[2], h: v[3] });
+    if let Some(e) = c.enc.lock().unwrap().as_mut() { e.set_scroll_proposal(r) }
+    c.kick();
+}
+
+/// 点击换算：内容坐标 y → 屏幕 y，并做点前校验。返回 JSON
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_resolveTap(env: JNIEnv, _c: JClass, y: jint, wait_ms: jint) -> jstring {
+    match core() { Some(c) => js(&env, &c.resolve_tap(y as i64, wait_ms.max(0) as u64).to_string()), None => js(&env, "{\"ok\":false,\"why\":\"nonet\"}") }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_hj_Native_param(mut env: JNIEnv, _c: JClass, key: JString, val: jdouble) -> jboolean {
     let k = s(&mut env, &key);
@@ -132,6 +148,8 @@ pub extern "system" fn Java_hj_Native_stats(env: JNIEnv, _c: JClass) -> jstring 
         "frames": st.frames, "rows": st.rows_sent, "tx_bytes": st.tx_bytes, "tx_msgs": st.tx_msgs,
         "enc_ms_last": st.enc_ms_last, "enc_ms_total": st.enc_ms_total, "inflight": c.inflight(),
         "connected": c.conn.lock().unwrap().is_some(),
+        "wheel_f": *c.wheel_f.lock().unwrap(), "view": *c.view.lock().unwrap(),
+        "scroll": c.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, r)| serde_json::json!({"head": h, "rect": [r.x, r.y, r.w, r.h], "edges": e.scroll_edges(), "n_shift": e.n_shift, "n_reset": e.n_reset, "n_unexplained": e.n_unexplained, "last_unexplained": e.last_unexplained}))),
     });
     js(&env, &j.to_string())
 }

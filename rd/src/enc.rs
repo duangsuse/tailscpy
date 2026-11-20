@@ -54,6 +54,15 @@ pub struct Encoder {
     scroll: Option<ScrollEnc>,
     proposal: Option<Rect>,
     expect: Option<i32>,
+    /// 最近一次 encode 认出的位移（0 = 没有）
+    pub last_dy: i32,
+    /// 在这个时刻之前允许换 Scroll 区域（页面刚换过）；之后即使提案变了也保持：折叠标题栏一类会让 A11y 容器边界在滚动中变化（20 §3：区域在页面生命周期内固定）
+    allow_change_until: u64,
+    /// 调试统计：认出位移 / 判为换页 / 认不出位移但变化不大的帧数
+    pub n_shift: u32,
+    pub n_reset: u32,
+    pub n_unexplained: u32,
+    pub last_unexplained: (usize, usize),
 }
 
 /// `defer`：有“像素上像照片、但 A11y 还没确认”的条带被压后了（图片先别当无损发），调用方过一会儿要再编一次
@@ -75,7 +84,7 @@ impl Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], info: vec![false; h], stale: vec![true; h],
             a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], fmask: Mask::full(w as u32), hints: vec![], defer_since: None,
-            scroll: None, proposal: None, expect: None,
+            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, last_unexplained: (0, 0),
         }
     }
 
@@ -100,6 +109,8 @@ impl Encoder {
 
     /// 采集头（屏幕第一行对应的画布 y）和滚动区矩形
     pub fn scroll_head(&self) -> Option<(i64, Rect)> { self.scroll.as_ref().map(|s| (s.head, s.rect)) }
+    pub fn scroll_mask(&self) -> Option<Mask> { self.scroll.as_ref().map(|s| s.smask.clone()) }
+    pub fn scroll_known(&self, y: i64) -> Option<u64> { self.scroll.as_ref().and_then(|s| s.known.get(&y).copied()) }
     pub fn scroll_edges(&self) -> (bool, bool) { self.scroll.as_ref().map_or((false, false), |s| (s.at_top, s.at_bottom)) }
 
     /// 拷入最新一帧（stride = 每行字节数）。只拷变化的行并标记 hash 过期；返回变化行数。
@@ -214,9 +225,11 @@ impl Encoder {
     }
 
     /// 提案和当前 Scroll 区域对不上：建 / 撤 / 重建。首次建时把已按 Fixed 发出的行用同页 `Copy` 搬进去，不重发像素。
-    fn sync_scroll(&mut self, p: &Params, ops: &mut Vec<Op>) -> Option<Vec<Region>> {
+    fn sync_scroll(&mut self, p: &Params, ops: &mut Vec<Op>, now_ms: u64) -> Option<Vec<Region>> {
         let want = self.proposal;
         if self.scroll.as_ref().map(|s| s.rect) == want { return None }
+        if self.scroll.is_some() && now_ms > self.allow_change_until { return None }   // 页面生命周期内区域固定
+        self.allow_change_until = 0;
         let old = self.scroll.take();
         self.stale.fill(true);
         let Some(rect) = want else {
@@ -252,7 +265,8 @@ impl Encoder {
         let (w, h, rb) = (self.w, self.h, self.w * 4);
         let level = p.get("zstd_level") as i32; let strip = (p.get("strip_rows") as usize).max(1);
         let mut ops: Vec<Op> = vec![];
-        let regions = self.sync_scroll(p, &mut ops);
+        self.last_dy = 0;
+        let regions = self.sync_scroll(p, &mut ops, now_ms);
         let (smask, scroll_rows) = match &self.scroll { Some(s) => (Some(s.smask.clone()), s.rect.y as usize..(s.rect.y + s.rect.h) as usize), None => (None, 0..0) };
         for y in 0..h {
             if self.stale[y] {
@@ -270,7 +284,7 @@ impl Encoder {
 
         // ───────── Scroll 区域 ─────────
         let mut scroll_img_ops: Vec<Op> = vec![];
-        if self.scroll.is_some() { rows += self.encode_scroll(p, defer_on, level, strip, &mut ops, &mut scroll_img_ops, &mut deferred); }
+        if self.scroll.is_some() { rows += self.encode_scroll(p, now_ms, defer_on, level, strip, &mut ops, &mut scroll_img_ops, &mut deferred); }
 
         // ───────── Fixed 区域（不含 Scroll 的行）─────────
         let missing: Vec<bool> = (0..h).map(|y| !scroll_rows.contains(&y) && (!self.a_valid[y] || self.a_hash[y] != self.cur_hash[y])).collect();
@@ -340,7 +354,7 @@ impl Encoder {
     }
 
     /// Scroll 区域一帧：求位移 → 采集头 → 缺的行（内容坐标）→ 编码。返回写了多少行。
-    fn encode_scroll(&mut self, p: &Params, defer_on: bool, level: i32, strip: usize, ops: &mut Vec<Op>, img_ops: &mut Vec<Op>, deferred: &mut [bool]) -> u32 {
+    fn encode_scroll(&mut self, p: &Params, now_ms: u64, defer_on: bool, level: i32, strip: usize, ops: &mut Vec<Op>, img_ops: &mut Vec<Op>, deferred: &mut [bool]) -> u32 {
         let (w, rb) = (self.w, self.w * 4);
         let cfg = ShiftCfg { min_ratio: p.get("shift_min_ratio"), min_rows: p.get("shift_min_rows") as u32, ..Default::default() };
         let page_change = p.get("page_change_ratio");
@@ -355,13 +369,14 @@ impl Encoder {
             if same == rh {
                 // 一点没变。预期了滚动却没动 → 到边的迹象由调用方的超时处理（expect_timeout）
             } else if let Some(sh) = detect_shift(&s.prev_h, &ch, &info, expect, &cfg) {
-                dy = sh.dy; s.head += dy as i64;
+                dy = sh.dy; s.head += dy as i64; self.last_dy = dy; self.n_shift += 1;
                 if let Some(e) = expect { if (dy.abs() as f64) < 0.5 * e.abs() as f64 { if e > 0 { s.at_bottom = true } else { s.at_top = true } } else { s.at_top = false; s.at_bottom = false } }
                 self.expect = None;
             } else if (rh - same) as f64 > page_change * rh as f64 { reset = true }
+            else { self.n_unexplained += 1; self.last_unexplained = (rh - same, rh); self.expect = None; /* 画面变了只是认不出位移：不是“滚不动”，别记到边 */ }
         }
         if s.head < 1024 || s.head > 2 * ORIGIN as i64 { reset = true }
-        if reset { s.known.clear(); s.lit.clear(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
+        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
         let s = self.scroll.as_mut().unwrap();
         // 缺的行（内容坐标）
         let missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();

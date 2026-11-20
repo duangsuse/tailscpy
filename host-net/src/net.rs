@@ -147,6 +147,7 @@ async fn session(conn: wtransport::Connection, core: Arc<Core>) -> Result<(), St
                         } }
                     });
                 }
+                Up::View { y, .. } => core.set_view(y),
                 Up::Hello { .. } => {}
                 other => core.up_event(format!("{{\"ev\":\"up\",\"msg\":{}}}", to_json(&other))),
             }

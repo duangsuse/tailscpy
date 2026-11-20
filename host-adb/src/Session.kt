@@ -35,7 +35,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
     @Volatile private var hintAt = 0L          // >0：到点取一次树（图片矩形 + 可编辑焦点）
     @Volatile private var stackAt = 0L         // >0：到点查一次栈（策略检查）
     private var lastEditable = false
-    private var lastHints = ""
+    private var lastHints = ""; private var lastRegion = ""
     private var offStrikes = 0; private var goneStrikes = 0; private var blankStrikes = 0
     private var lastStackCheck = 0L; private var lastTree = 0L
     private val homeComp: String? by lazy { sh("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -1").trim().takeIf { it.contains('/') } }
@@ -100,6 +100,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
 
     private fun event(e: JSONObject) {
         when (e.getString("ev")) {
+            "scroll" -> need { pf.wheel(e.getInt("x").toFloat(), e.getInt("y").toFloat(), -e.getDouble("notches").toFloat(), 0f) }   // 采集头调度要的一次滚动（正 = 往下滚；AXIS_VSCROLL 为负）
             "connected" -> {
                 connected = true; detachAt = 0
                 log("A 已连接 ${e.optString("peer")}")
@@ -121,8 +122,8 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
         when (name) {
             "Open" -> openApp(b.getString("pkg"), b.optJSONObject("geom"))
             "Close" -> closeApp()
-            "Tap" -> need { val (x, y) = pt(b); pf.tap(x, y); afterInput() }
-            "LongPress" -> need { val (x, y) = pt(b); pf.tap(x, y, 650); afterInput() }
+            "Tap" -> need { tapAt(b, 40) }
+            "LongPress" -> need { tapAt(b, 650) }
             "Touch" -> need { val (x, y) = pt(b); pf.touch(0, b.getInt("phase"), x, y); if (b.getInt("phase") == 2) afterInput() }
             // Wheel 的 dx/dy 单位是“格”（A 把像素除以一格像素数）。浏览器 deltaY>0 = 往下滚 = Android 的 AXIS_VSCROLL 为负
             "Wheel" -> need { val (x, y) = pt(b); pf.wheel(x, y, -b.getDouble("dy").toFloat(), b.getDouble("dx").toFloat()); afterInput() }
@@ -139,6 +140,16 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
             "View", "Forget", "Persisted", "Inventory", "VerifyFail" -> {}   // M2/M3 才有用
             else -> log("忽略 Up::$name")
         }
+    }
+    /** 点按 / 长按。Scroll 区域（region 1）里的点是内容坐标：先换算成屏幕坐标并做点前校验，A 看到的和 B 现在显示的不一致就不点（Stale）。 */
+    private fun tapAt(b: JSONObject, hold: Long) {
+        val at = b.getJSONObject("at"); val x = at.getDouble("x").toFloat(); var y = at.getDouble("y").toFloat()
+        if (at.optInt("region") == 1) {
+            val r = JSONObject(Native.resolveTap(at.getInt("y"), 600))
+            if (!r.optBoolean("ok")) { fault("Stale", "内容已变化或还没就位（${r.optString("why")}），请再点一次"); return }
+            y = r.getInt("sy").toFloat()
+        }
+        pf.tap(x, y, hold); afterInput()
     }
     private fun need(f: () -> Unit) { if (active) f() }
     private fun pt(b: JSONObject): Pair<Float, Float> = b.getJSONObject("at").let { it.getDouble("x").toFloat() to it.getDouble("y").toFloat() }
@@ -157,7 +168,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
         val r = dbg.openSession(req)
         if (!r.optBoolean("ok")) { fault("AppGone", r.optString("err")); return }
         sessPkg = pkg; geomW = r.getInt("w"); geomH = r.getInt("h"); geomDpi = r.getInt("dpi")
-        offStrikes = 0; goneStrikes = 0; blankStrikes = 0; lastEditable = false; lastHints = ""
+        offStrikes = 0; goneStrikes = 0; blankStrikes = 0; lastEditable = false; lastHints = ""; lastRegion = ""
         val fl: (FrameMeta) -> Unit = { m -> if (m.changedRows > 0) Native.frame(pf.curLocked()) }
         frameL = fl; pf.onFrame(fl)
         val al: (JSONObject) -> Unit = { ev -> val k = ev.optString("kind"); if (k.contains("WINDOW") || k.contains("VIEW_FOCUSED") || k.contains("SCROLLED") || k.contains("TEXT_SELECTION")) hintAt = System.currentTimeMillis() + 120 }
@@ -172,7 +183,7 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
         down(JSONObject().put("Opened", JSONObject().put("pkg", sessPkg).put("geom", JSONObject().put("w", geomW).put("h", geomH).put("dpi", geomDpi))))
         Native.begin(geomW, geomH)
         synchronized(pf.lock) { if (pf.seq > 0) Native.frame(pf.curLocked()) }
-        lastHints = ""; lastEditable = false; hintAt = System.currentTimeMillis() + 100
+        lastHints = ""; lastRegion = ""; lastEditable = false; hintAt = System.currentTimeMillis() + 100
     }
 
     /** A 要求关闭会话（回到选包界面） */
@@ -221,6 +232,8 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
         if (!a11y.connected || pf.displayId < 0) return
         val h = a11y.imageRects(pf.displayId, 3600).toString()
         if (h != lastHints) { lastHints = h; Native.hints(h) }
+        val rg = a11y.scrollRegion(pf.displayId).toString()
+        if (rg != lastRegion) { lastRegion = rg; Native.scrollRegion(rg) }
         val ed = a11y.editableFocus(pf.displayId)
         if (ed != lastEditable) { lastEditable = ed; down(JSONObject().put("Focus", JSONObject().put("editable", ed))) }
     }
