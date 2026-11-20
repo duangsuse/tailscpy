@@ -10,13 +10,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 #[derive(Default)]
-pub struct VaState { pub canvas: Option<Canvas>, pub rx_bytes: u64, pub applied_seq: u64, pub txs: u64, pub verify_fail: u64, pub images: u64, pub err: String, pub last_vf: String }
+pub struct VaState { pub gen: u64, pub canvas: Option<Canvas>, pub rx_bytes: u64, pub applied_seq: u64, pub txs: u64, pub verify_fail: u64, pub images: u64, pub err: String, pub last_vf: String, pub log: std::collections::VecDeque<String> }
 
 pub fn attach(core: &Arc<Core>) {
     let id = core.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
     let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (tx_tx, mut tx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    *core.va.lock().unwrap() = Some(VaState::default());
+    *core.va.lock().unwrap() = Some(VaState { gen: id, ..Default::default() });   // 世代号：上一次附着遗留在队列里的消息不能应用到新状态上
     core.conn.lock().unwrap().replace(Conn { id, ctl: ctl_tx, tx: tx_tx, conn: None });
     core.reset_flow();
     std::thread::spawn(move || while ctl_rx.blocking_recv().is_some() {});
@@ -25,6 +25,7 @@ pub fn attach(core: &Arc<Core>) {
         while let Some(bytes) = tx_rx.blocking_recv() {
             let mut g = c.va.lock().unwrap();
             let Some(va) = g.as_mut() else { continue };
+            if va.gen != id { return }   // 已经被新的附着取代
             va.rx_bytes += bytes.len() as u64;
             let d: Down = match from_postcard(&bytes[4..]) { Ok(d) => d, Err(e) => { va.err = e; continue } };
             let mut ack = None;
@@ -38,6 +39,8 @@ pub fn attach(core: &Arc<Core>) {
                     va.applied_seq = seq; ack = Some(seq);
                 }
                 Down::Tx { seq, ops, .. } => {
+                    va.log.push_back(format!("tx{} {}", seq, ops.iter().map(|o| match o { Op::Overlay { id, dst, ops } => format!("Ov#{id}[{},{},{}x{},{}]", dst.region, dst.y, dst.w, dst.h, ops.len()), o => format!("{}[{:?}]", o.kind(), o.dst().map(|d| (d.region, d.x, d.y, d.w, d.h))) }).collect::<Vec<_>>().join(" ")));
+                    while va.log.len() > 60 { va.log.pop_front(); }
                     match va.canvas.as_mut().map(|cv| cv.apply(&ops)) {
                         Some(Ok(ap)) => { if !ap.verify_fail.is_empty() { va.last_vf = format!("{:?} ops={:?}", ap.verify_fail, ops.iter().map(|o| format!("{}:{:?}", o.kind(), o.dst().map(|d| (d.region, d.y, d.h)))).collect::<Vec<_>>()) } va.verify_fail += ap.verify_fail.len() as u64; va.images += ap.images.len() as u64; va.txs += 1 }
                         Some(Err(e)) => va.err = e,
@@ -64,7 +67,7 @@ pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
     let why = core.idle_why(); let idle = why.is_empty();
     let mut g = core.va.lock().unwrap();
     let Some(va) = g.as_mut() else { return serde_json::json!({"attached": false}) };
-    let mut j = serde_json::json!({"attached": true, "idle": idle, "idle_why": why, "rx_bytes": va.rx_bytes, "txs": va.txs, "applied_seq": va.applied_seq,
+    let mut j = serde_json::json!({"attached": true, "idle": idle, "idle_why": why, "quiet_ms": core.last_push.lock().unwrap().elapsed().as_millis() as u64, "rx_bytes": va.rx_bytes, "txs": va.txs, "applied_seq": va.applied_seq,
         "tx_seq": core.tx_seq.load(Ordering::Relaxed), "verify_fail": va.verify_fail, "last_vf": va.last_vf, "images": va.images, "err": va.err});
     let (rx_bytes_unused, _) = (0, 0); let _ = rx_bytes_unused;
     if let Some(cv) = va.canvas.as_mut() {
@@ -92,8 +95,10 @@ pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
                 if row != fr { for x in 0..xend { if lay[x] != LAYER_LIT && row[x * 4..x * 4 + 4] != fr[x * 4..x * 4 + 4] { diff += 1; bb = [bb[0].min(x), bb[1].min(y), bb[2].max(x + 1), bb[3].max(y + 1)] } } }
             }
             if rows {
-                if has_lit { let mut r = row.to_vec(); for x in 0..w { if lay[x] == LAYER_LIT { r[x * 4..x * 4 + 4].fill(0) } } hs.push(format!("{:x}", row_hash_masked(&r, &full))) }
-                else { hs.push(format!("{:x}", row_hash_masked(row, &full))) }
+                // 滚动区右缘窄带不属于“A 承诺的内容”（B 不发，A 用左邻列延伸）：行 hash 不含它
+                let m = if in_sc { Mask::excluding(w as u32, &[(xend as u32, w as u32)]) } else { full.clone() };
+                if has_lit { let mut r = row.to_vec(); for x in 0..w { if lay[x] == LAYER_LIT { r[x * 4..x * 4 + 4].fill(0) } } hs.push(format!("{:x}", row_hash_masked(&r, &m))) }
+                else { hs.push(format!("{:x}", row_hash_masked(row, &m))) }
             }
         }
         if let Some(sc) = cv.scroll.as_ref() { j["scroll"] = serde_json::json!({"head": sc.head, "y_min": sc.y_min, "y_max": sc.y_max, "at_top": sc.at_top, "at_bottom": sc.at_bottom}) }
@@ -102,3 +107,13 @@ pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
     }
     j
 }
+
+/// 把虚拟 A 当前看到的整帧（合成后）写成裸 RGBA 文件（调试用）
+pub fn dump(core: &Arc<Core>, path: &str) -> Result<usize, String> {
+    let mut g = core.va.lock().unwrap();
+    let cv = g.as_mut().and_then(|v| v.canvas.as_mut()).ok_or("没有虚拟 A 画布")?;
+    let head = cv.scroll.as_ref().map(|s| s.head); cv.compose(head.unwrap_or(0));
+    std::fs::write(path, &cv.view).map_err(|e| e.to_string())?; Ok(cv.view.len())
+}
+
+pub fn log(core: &Arc<Core>) -> Vec<String> { core.va.lock().unwrap().as_ref().map_or(vec![], |v| v.log.iter().cloned().collect()) }

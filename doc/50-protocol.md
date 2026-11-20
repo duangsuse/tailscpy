@@ -178,3 +178,8 @@ sequenceDiagram
 - 缓存对齐 M1 固定回 `Welcome{Reset}`；一个 B 只服务一个 A，新连接顶掉旧连接（旧连接先收到 `Replaced`）。
 - 新参数：`coalesce_ms`（画面安静多久再编，默认 40）、`coalesce_max_ms`（最多拖多久，默认 200）、`img_defer_ms`（疑似图片等 A11y 提案的上限，默认 1000）、`img_min_colors`、`img_min_area`、`strip_rows`、`inflight_kb`、`detach_keep_s`。
 
+### M2 追加
+
+- `Op::Head{region, y}`（采集头，只追加）；`Down::Regions` 用来宣布 / 修正 Scroll 区域（B 在 `Tx` 之前先发）；`Up::View{y}` 是 A 的视口（画布 y）——**A 是视口的唯一来源**，跟随 B 时也要报，否则 B 会去追旧目标。
+- 新参数：`sb_w`(20，只作用于 Scroll 区)、`shift_min_ratio`、`shift_min_rows`、`page_change_ratio`、`pin_min_rows`、`hold_known_ms`、`overlay`、`overlay_max_frac`、`commit_ms`。
+

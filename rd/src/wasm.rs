@@ -7,8 +7,8 @@ use crate::dec::Canvas;
 use crate::wire::*;
 use std::cell::RefCell;
 
-struct St { canvas: Option<Canvas>, out: Vec<u8>, images: Vec<(Dst, Vec<u8>)> }
-thread_local! { static ST: RefCell<St> = RefCell::new(St { canvas: None, out: vec![], images: vec![] }) }
+struct St { canvas: Option<Canvas>, out: Vec<u8>, images: Vec<(Dst, Vec<u8>)>, export: Vec<u8> }
+thread_local! { static ST: RefCell<St> = RefCell::new(St { canvas: None, out: vec![], images: vec![], export: vec![] }) }
 
 fn with<R>(f: impl FnOnce(&mut St) -> R) -> R { ST.with(|s| f(&mut s.borrow_mut())) }
 fn set_out(s: &mut St, text: String) -> i32 { s.out = text.into_bytes(); s.out.len() as i32 }
@@ -93,3 +93,7 @@ fn set_out(s: &mut St, text: String) -> i32 { s.out = text.into_bytes(); s.out.l
     })
 }
 #[no_mangle] pub extern "C" fn rd_out_len() -> usize { with(|s| s.out.len()) }
+
+/// 导出 Scroll 画布 [y0, y1) 行成 RGBA（长截屏）：返回字节数，数据在 `rd_export_ptr()`
+#[no_mangle] pub extern "C" fn rd_export(y0: i32, y1: i32) -> usize { with(|s| { let v = s.canvas.as_ref().map_or(vec![], |c| c.export_scroll(y0, y1)); s.export = v; s.export.len() }) }
+#[no_mangle] pub extern "C" fn rd_export_ptr() -> *const u8 { with(|s| s.export.as_ptr()) }

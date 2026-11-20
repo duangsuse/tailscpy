@@ -154,3 +154,10 @@ com.and96.aggregator_news  com.aefyr.sai
 - **虚拟 A**（`host-net/src/va.rs`）：进程内的 A，收线上那串 `Down` 用 rd 解码，供场景 runner 的实跑模式使用；JPEG 不解码，比较时排除有损像素。
 - 启动参数：`--net-port 4433 --lan --allow popup,any --viewer <页面URL> --detach-keep 60 --no-net`。
 
+## 实现备注（M2）
+
+- **采集头调度**在 Rust（`Core::drive_scroll`），Kotlin 只执行：Rust 往上行事件队列放 `{"ev":"scroll","x","y","notches"}`，`Session` 收到后注入 `AXIS_VSCROLL`（负 = 往下滚）。F（像素/格）因容器而异（设置首页 ≈347，RecyclerView 168），由实测位移自学；`Native.begin` 和换页会清掉旧的视口目标。
+- **点击**：`Session.tapAt` 对 region 1 的点调 `Native.resolveTap`（B 把采集头追到位，再比对 hash），失败发 `Fault{Stale}`。
+- **A11y 提案**：`A11y.scrollRegion` 取面积最大的、可见的纵向滚动节点（排除类名 / id 含 Horizontal、Pager）；`refreshHints` 同时给图片矩形和 Scroll 区域。
+- **踩过的坑**：① 浏览器标签页留着时会抢走连接（一个 B 只服务一个 A），做实跑测试要先把标签页导航到 about:blank；② `is_idle` 里按“锁一个取一个、立刻放”取锁，`drive_scroll` 是 enc → req → view 的顺序，反过来取会死锁（死过两次）；③ 滚轮请求连续两次没有帧响应才算“到边”，一次超时可能只是慢。
+

@@ -3,7 +3,7 @@
 把 Android 设备（B）上**单个白名单 App** 投到浏览器（A）：A 里点 / 滑 / 返回，B 的画面以单画布回传。目标是在 300–800 KB/s 的 Tailscale 链路上做到文字逐像素锐利、见过的内容来回滚不再下行流量、返回上一页立即出现。
 
 - 规则与总览：[GOAL.md](GOAL.md)（金标准是 [IDEA.md](IDEA.md)），展开文档在 [doc/](doc/)，任务顺序见 [doc/90-tasks.md](doc/90-tasks.md)（含 M0 进度表）。
-- 现在做到 **M1（能看能点）**：WebTransport 传输、基线编码（对 A 的状态求差 + 列掩码行 hash + Fill / Palette / Residual + 基础有损图片）、浏览器查看端（点 / 滑 / 返回 / 打字 / 剪贴板、l 面板、r 遮罩）、白名单与跨包策略、设置还原；M0 的工具链（人工录制器、回放、语料录制、探针、bench）都在。本地滚动、页面缓存是 M2 / M3。
+- 现在做到 **M2（本地滚动，部分）**：在 M1 之上加了 Scroll 画布（位移检测、回程零流量）、A 本地滚动 / 惯性 / 自绘滚动条、采集头调度、Overlay、点击换算与点前校验，详见 [doc/90-tasks.md](doc/90-tasks.md) 的 M2 进度表（页面识别、远跳零散段、minimap 没做）。M1 是：WebTransport 传输、基线编码（对 A 的状态求差 + 列掩码行 hash + Fill / Palette / Residual + 基础有损图片）、浏览器查看端（点 / 滑 / 返回 / 打字 / 剪贴板、l 面板、r 遮罩）、白名单与跨包策略、设置还原；M0 的工具链（人工录制器、回放、语料录制、探针、bench）都在。本地滚动、页面缓存是 M2 / M3。
 
 ## 打开录制器
 
@@ -24,14 +24,17 @@ host 没起会自动运行 `host-adb/run.sh`；保存目录默认 `e2e/cases`（
 ## 打开查看端（浏览器看 / 点 B 上的 App）
 
 ```sh
-./build.sh                                   # rd.wasm + viewer、libhj_host.so、hj.dex、bench
-host-adb/run.sh 7701 --lan                   # 起 host（UDP 4433 起 WebTransport）；--lan 额外绑私网网卡（默认只绑回环 + tailnet）
-node viewer/serve.mjs 8080 &                 # 开发用静态服务器，页面是 http://localhost:8080/
-adb shell cat /data/local/tmp/hj/url.txt     # B 打印的完整 URL：#b=<地址:端口>&h=<证书 hash>&t=<token>；浏览器打开其中一行
+./up.sh                                      # 一条命令：（缺产物才构建）→ 起 B 上的 host → 起静态服务器 → 打印并打开查看页 URL
+./up.sh --app com.android.settings           # 打开后自动进这个 App；--no-open 只打印；--build 强制重新构建；--port 8765
+./up.sh -- --allow popup,any                 # “--”之后的参数原样传给 host
+./up.sh stop                                 # 停 host 和静态服务器
 ```
 
-- 右上角下拉框选白名单 App；左键点按 / 长按 / 拖动，**右键或 Esc = 返回**，滚轮透传，键盘打字（输入框有焦点时），Ctrl+C / V / X / A。
-- **l**（或 Alt+L）：三层字节、链路（码率 / RTT / 未确认字节）、全部参数滑块（改了立刻生效）、网络探针按钮；**r**（Alt+R）循环：关 / 最近刷新的矩形 / 图文分层着色。
+静态服务器优先用 `http-server -p 8765 -c 1`（没装就用 `node viewer/serve.mjs`）；页面是 `http://localhost:8765/`，URL 的 `#b=<地址:端口>&h=<证书 hash>&t=<token>` 由 B 打印（也在 `/data/local/tmp/hj/url.txt`），`up.sh` 优先选 tailnet 地址，其次局域网地址。序列号取环境变量 `B`。
+手动分步：`./build.sh`；`host-adb/run.sh 7701 --lan`（`--lan` 额外绑私网网卡，默认只绑回环 + tailnet）；`node viewer/serve.mjs 8080`。
+
+- 右上角下拉框选白名单 App；左键点按 / 长按，**右键或 Esc = 返回**，键盘打字（输入框有焦点时），Ctrl+C / V / X / A。**滚动区里的竖直拖动、滚轮、右缘滚动条都是本地滚动**（见过的内容来回滚零下行流量，惯性、自绘滚动条）；横向拖和非滚动区的拖走 `Touch`。
+- **l**（或 Alt+L）：三层字节、链路（码率 / RTT / 未确认字节）、滚动区（采集头 / 视口 / 已知范围）、全部参数滑块（改了立刻生效）、网络探针、导出长截屏 PNG；**r**（Alt+R）循环：关 / 最近刷新的矩形 / 图文分层着色。
 - 越界（默认单应用模式：设置里点搜索）会被拦回并提示；`host-adb/run.sh 7701 --lan --allow popup,any` 之类放宽（`popup` = `[popup]` 放行临时窗口，`any` = `*` 允许任意切换并可退回桌面，其余是额外包名；写成 `[popup]` / `*` 会被 adb shell 当 glob）。`--detach-keep 60` 是断线后保留会话的秒数；关掉标签页后超时即关虚拟屏并还原 B 的设置。
 - 命令行当 A：`cargo run --release -p hj_host --example probe -- <地址:端口> <hash> <token> [包名]`（握手并打印 Welcome；带包名则打开会话 5 秒后直接断开）。
 - 证书是 B 自签的 ECDSA P-256，13 天有效，超过 10 天换新（URL 随之变）；浏览器要求 < 14 天。
@@ -114,6 +117,7 @@ node e2e/hc.mjs rec_start dir=/data/local/tmp/hj/rec/x  ...  rec_stop   # 语料
 
 ```sh
 node e2e/scenario.mjs cold-open                      # 每个白名单 App 跑一遍；也可指定：scroll-down-up com.android.settings
+node e2e/scenario.mjs scroll-down-up --live         # 另有 taps-in-place（计算器连按）；cold-open / enter-back 同理
 node e2e/scenario.mjs cold-open --live              # 实跑模式：runner 扮演 A，整条编码→队列→解码链路都走，性质在 A 的画布上查（见下）
 node e2e/scenario.mjs all com.android.settings --rec --twice    # 同时录语料到 ../corpus/trace/<设备>/<包>/<场景>/<批次>/；连跑两次比对
 node e2e/replay.mjs list <trace目录>                 # 事件时间线摘要 + 时间戳单调检查

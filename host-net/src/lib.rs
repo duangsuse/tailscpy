@@ -183,3 +183,14 @@ pub extern "system" fn Java_hj_Native_vaAttach(_env: JNIEnv, _c: JClass, on: jbo
 pub extern "system" fn Java_hj_Native_vaState(env: JNIEnv, _c: JClass, rows: jboolean) -> jstring {
     match core() { Some(c) => js(&env, &va::state(c, rows != 0).to_string()), None => js(&env, "{\"attached\":false}") }
 }
+
+/// 调试：虚拟 A 当前画面写成裸 RGBA 文件，返回字节数（或错误文本）
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_vaDump(mut env: JNIEnv, _c: JClass, path: JString) -> jstring {
+    let p = s(&mut env, &path);
+    match core() { Some(c) => js(&env, &match va::dump(c, &p) { Ok(n) => n.to_string(), Err(e) => format!("err:{e}") }), None => js(&env, "err:nonet") }
+}
+
+/// 调试：虚拟 A 最近收到的 Tx 的 Op 摘要（JSON 数组）
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_vaLog(env: JNIEnv, _c: JClass) -> jstring { match core() { Some(c) => js(&env, &serde_json::to_string(&va::log(c)).unwrap()), None => js(&env, "[]") } }

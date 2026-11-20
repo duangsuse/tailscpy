@@ -66,6 +66,10 @@ pub struct Encoder {
     ovs: Vec<Ov>,
     next_ov: u32,
     last_shift_ms: u64,
+    /// 已发出的 JPEG：(区域, 起始 y, x, w, h) → 源像素签名。同一块没变就不再发（同一行里别的部分被压后时，图片不能每帧重发）
+    img_sig: HashMap<(u16, i64, u32, u32, u32), u64>,
+    /// 压后期间已发出的条带（同样不重发）：一行里有的部分被压后，其余部分下一轮还会再编，不该每 50 ms 重发
+    defer_sent: HashMap<(u16, i64, u32, u32, u32), u64>,
     /// 调试统计：认出位移 / 判为换页 / 认不出位移但变化不大的帧数
     pub n_shift: u32,
     pub n_reset: u32,
@@ -99,13 +103,13 @@ impl Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], info: vec![false; h], stale: vec![true; h],
             a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], fmask: Mask::full(w as u32), hints: vec![], defer_since: None,
-            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, ovs: vec![], next_ov: 1, last_shift_ms: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
+            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, ovs: vec![], next_ov: 1, last_shift_ms: 0, img_sig: HashMap::new(), defer_sent: HashMap::new(), n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
         }
     }
 
     /// A 的缓存作废（新会话 / `Resync` / `Welcome{Reset}`）：之后整屏都是“缺”的，Scroll 区域重新按提案建。
     pub fn reset_a(&mut self) {
-        self.a_valid.fill(false); self.layer.fill(0); self.shadow.fill(0); self.scroll = None; self.stale.fill(true); self.ovs.clear();
+        self.a_valid.fill(false); self.layer.fill(0); self.shadow.fill(0); self.scroll = None; self.stale.fill(true); self.ovs.clear(); self.img_sig.clear(); self.defer_sent.clear();
     }
 
     /// A11y 给的图片矩形提案（屏幕像素）。只是提案：要过像素确认才会走 JPEG。
@@ -176,6 +180,13 @@ impl Encoder {
         })
     }
 
+    /// 矩形源像素的签名（FNV）
+    fn rect_sig(&self, r: &Rect) -> u64 {
+        let rb = self.w * 4; let mut h: u64 = 0xcbf29ce484222325;
+        for y in r.y..r.y + r.h { let o = y as usize * rb + r.x as usize * 4; for &b in &self.cur[o..o + r.w as usize * 4] { h = (h ^ b as u64).wrapping_mul(0x100000001b3) } }
+        h
+    }
+
     fn jpeg(&self, r: &Rect, q: u8) -> Vec<u8> {
         let rb = self.w * 4; let mut rgb = Vec::with_capacity((r.w * r.h * 3) as usize);
         for y in r.y..r.y + r.h { let o = y as usize * rb + r.x as usize * 4; for px in self.cur[o..o + r.w as usize * 4].chunks_exact(4) { rgb.extend_from_slice(&px[..3]) } }
@@ -210,6 +221,26 @@ impl Encoder {
     /// 这个矩形里 A 现在是不是全是无损内容（没有有损像素，且已经写过）：晚到的 A11y 图片提案据此决定要不要改发 JPEG
     fn rect_lossless_known(&self, r: &Rect) -> bool {
         (r.y..r.y + r.h).all(|y| { let o = y as usize * self.w + r.x as usize; self.layer[o..o + r.w as usize].iter().all(|&l| l == LAYER_BG) })
+    }
+
+    /// 压后期间：已经发过、源像素没变的条带不再发；同时让和它重叠的旧 JPEG 签名失效（画布内容被别的东西覆盖了，之后同样的图片要重发）
+    fn dedupe_strips(&mut self, region: u16, key_of: &dyn Fn(u32) -> i64, in_defer: bool, ops: Vec<Op>) -> Vec<Op> {
+        let mut out = vec![];
+        for op in ops {
+            if let Some(d) = op.dst() {
+                let key = (region, key_of(d.y), d.x, d.w, d.h); let r = Rect { x: d.x, y: d.y, w: d.w, h: d.h }; let sig = self.rect_sig(&r);
+                if in_defer && !matches!(op, Op::Image { .. }) {
+                    if self.defer_sent.get(&key) == Some(&sig) { continue }
+                    self.defer_sent.insert(key, sig);
+                }
+                if !matches!(op, Op::Image { .. }) {
+                    let (k0, k1) = (key.1, key.1 + d.h as i64);
+                    self.img_sig.retain(|k, _| !(k.0 == region && k.1 < k1 && k.1 + k.4 as i64 > k0 && k.2 < d.x + d.w && k.2 + k.3 > d.x));
+                }
+            }
+            out.push(op);
+        }
+        out
     }
 
     /// 一条横带（屏幕坐标）：把 `images` 挖掉之后按条带编码。返回的 Op 是屏幕坐标、区域 0；被压后的行记进 `deferred`。
@@ -295,7 +326,7 @@ impl Encoder {
         if self.scroll.is_some() && now_ms > self.allow_change_until { return None }   // 页面生命周期内区域固定
         self.allow_change_until = 0;
         let old = self.scroll.take();
-        self.stale.fill(true); self.ovs.retain(|o| o.region != 1);
+        self.stale.fill(true); self.ovs.retain(|o| o.region != 1); self.img_sig.retain(|k, _| k.0 != 1);
         let Some(rect) = want else {
             if let Some(o) = old { for y in o.rect.y..o.rect.y + o.rect.h { self.a_valid[y as usize] = false } }   // 撤销后这些行按 Fixed 重发
             return Some(self.regions_msg());
@@ -362,7 +393,7 @@ impl Encoder {
         let inplace: Vec<usize> = (0..h).filter(|&y| !scroll_rows.contains(&y) && self.a_valid[y] && self.a_hash[y] != self.cur_hash[y]).collect();
         let page_chg = inplace.len() >= 8 && inplace.len() as f64 > p.get("page_change_ratio") * fixed_rows as f64;
         // 图片行不走 Overlay（补丁里没有 JPEG，照片会被无损发一遍）；变化面积大的（内容刷新，不是涟漪 / 光标 / 开关）也直接写画布
-        let in_img = |y: usize| self.hints.iter().any(|r| y >= r.y as usize && y < (r.y + r.h) as usize);
+        let in_img = |y: usize| self.hints.iter().any(|r| y >= r.y as usize && y < (r.y + r.h) as usize) || self.layer[y * w..(y + 1) * w].iter().any(|&l| l == LAYER_LIT);
         let inplace: Vec<usize> = inplace.into_iter().filter(|&y| !in_img(y)).collect::<Vec<_>>();
         let n_img_rows = (0..h).filter(|&y| !scroll_rows.contains(&y) && self.a_valid[y] && self.a_hash[y] != self.cur_hash[y] && in_img(y)).count();
         let big = inplace.len() as f64 > p.get("overlay_max_frac") * fixed_rows as f64;
@@ -407,8 +438,16 @@ impl Encoder {
         }
         let fixed_empty = bands.is_empty() && images.is_empty();
         if fixed_empty && ops.is_empty() && scroll_img_ops.is_empty() && regions.is_none() && cand_f.is_empty() && self.ovs.is_empty() { return Out { ops: vec![], rows: 0, defer: deferred.iter().any(|&d| d), regions: None, ov_pending: false } }
-        for &(y0, y1, x0, x1) in &bands { self.lit_band(y0, y1, x0, x1, &images, level, strip, defer_on, &mut deferred, &mut ops) }
-        for r in &images { ops.push(Op::Image { dst: Dst { region: 0, x: r.x, y: r.y, w: r.w, h: r.h }, sprite: None, q: p.get("img_q") as u8, mask: vec![], data: self.jpeg(r, p.get("img_q") as u8) }) }
+        let mut fixed_ops: Vec<Op> = vec![];
+        for &(y0, y1, x0, x1) in &bands { self.lit_band(y0, y1, x0, x1, &images, level, strip, defer_on, &mut deferred, &mut fixed_ops) }
+        let in_defer = deferred.iter().any(|&d| d);
+        let fo = self.dedupe_strips(0, &|y| y as i64, in_defer, fixed_ops); ops.extend(fo);
+        for r in &images {
+            let (key, sig) = ((0u16, r.y as i64, r.x, r.w, r.h), self.rect_sig(r));
+            if self.img_sig.get(&key) == Some(&sig) { continue }   // 这块图片已经发过且没变
+            self.img_sig.insert(key, sig);
+            ops.push(Op::Image { dst: Dst { region: 0, x: r.x, y: r.y, w: r.w, h: r.h }, sprite: None, q: p.get("img_q") as u8, mask: vec![], data: self.jpeg(r, p.get("img_q") as u8) })
+        }
         ops.extend(scroll_img_ops);
 
         // 记入 A 的状态（Fixed）
@@ -442,7 +481,7 @@ impl Encoder {
             }
         }
         let defer = deferred.iter().any(|&d| d);
-        if !defer { self.defer_since = None }
+        if !defer { self.defer_since = None; self.defer_sent.clear() }
         Out { ops, rows, defer, regions, ov_pending: !self.ovs.is_empty() }
     }
 
@@ -491,7 +530,7 @@ impl Encoder {
             }
         }
         if s.head < 1024 || s.head > 2 * ORIGIN as i64 { reset = true }
-        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); self.ovs.retain(|o| o.region != 1); let s = self.scroll.as_mut().unwrap(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
+        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); self.ovs.retain(|o| o.region != 1); self.img_sig.retain(|k, _| k.0 != 1); let s = self.scroll.as_mut().unwrap(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
         let s = self.scroll.as_mut().unwrap();
         // 缺的行（内容坐标）
         let mut missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();
@@ -511,7 +550,7 @@ impl Encoder {
                 }
                 let sy = y0 + i;
                 let in_img = self.hints.iter().any(|r| sy >= r.y as usize && sy < (r.y + r.h) as usize);
-                if use_ov && !in_img { missing[i] = false; cand_s.push((cy, sy, ch[i])) }   // 图片行 / overlay 关：按画布写
+                if use_ov && !in_img && !s.lit.contains(&cy) { missing[i] = false; cand_s.push((cy, sy, ch[i])) }   // 图片行 / overlay 关：按画布写
             } else if known_same { s.pending.remove(&cy); }
         }
         if cand_s.len() as f64 > p.get("overlay_max_frac") * rh as f64 { for c in cand_s.drain(..) { missing[c.1 - y0] = true } }   // 变化面积大：内容刷新，按画布写
@@ -560,8 +599,15 @@ impl Encoder {
             self.lit_band(y0 + i0, y0 + i1, x0, x1, &images, level, strip, defer_on, &mut sc_deferred, &mut lit_ops);
             for r in y0 + i0..y0 + i1 { if sc_deferred[r] { deferred[r] = true } }
         }
+        let in_defer = (y0..y0 + rh).any(|r| deferred[r]);
+        let lit_ops = self.dedupe_strips(1, &|sy| to_canvas(sy) as i64, in_defer, lit_ops);   // 屏幕坐标下去重，再换成画布坐标
         for op in lit_ops { ops.push(remap(op, 1, &to_canvas)) }
-        for r in &images { img_ops.push(remap(Op::Image { dst: Dst { region: 0, x: r.x, y: r.y, w: r.w, h: r.h }, sprite: None, q: p.get("img_q") as u8, mask: vec![], data: self.jpeg(r, p.get("img_q") as u8) }, 1, &to_canvas)) }
+        for r in &images {
+            let (key, sig) = ((1u16, to_canvas(r.y) as i64, r.x, r.w, r.h), self.rect_sig(r));
+            if self.img_sig.get(&key) == Some(&sig) { continue }
+            self.img_sig.insert(key, sig);
+            img_ops.push(remap(Op::Image { dst: Dst { region: 0, x: r.x, y: r.y, w: r.w, h: r.h }, sprite: None, q: p.get("img_q") as u8, mask: vec![], data: self.jpeg(r, p.get("img_q") as u8) }, 1, &to_canvas))
+        }
         // 记入状态
         let s = self.scroll.as_mut().unwrap();
         for &(i0, i1, _, _) in &bands { for ii in i0..i1 {
@@ -944,5 +990,22 @@ mod tests {
         let o2 = srun(&mut e, &mut c, &p, &f1, 200); assert_eq!(ov_count(&o2), (0, 0, 0));
         let o3 = srun(&mut e, &mut c, &p, &f1, 400); assert_eq!(ov_count(&o3).2, 1); assert!(compose_equals(&mut c, &f1, 20));
         let o4 = srun(&mut e, &mut c, &p, &f0, 500); assert_eq!(ov_count(&o4).0, 1, "提交后变回去又是原地变化");
+    }
+
+    #[test] fn export_long_screenshot_has_no_scrollbar_artifacts_and_matches_content() {
+        let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
+        e.set_scroll_proposal(Some(srect()));
+        for (i, off) in [0i64, 40, 80, 120].into_iter().enumerate() {
+            let mut f = scroll_frame(off); for y in 30..60 { let o = (y * SW + SW - 4) * 4; f[o..o + 3].copy_from_slice(&[90, 90, 90]) }   // 每帧都有滚动条滑块
+            srun(&mut e, &mut c, &p, &f, i as u64 * 10);
+        }
+        let sc = c.scroll.as_ref().unwrap(); let (y0, y1) = (sc.y_min, sc.y_max); assert!(y1 - y0 >= 240);
+        let img = c.export_scroll(y0, y1); let rb = SW * 4;
+        for i in 0..(y1 - y0) as usize {
+            let k = (y0 + i as i32 - ORIGIN as i32) as i64; let want = content_row(k);
+            assert_eq!(&img[i * rb..i * rb + (SW - 20) * 4], &want[..(SW - 20) * 4], "导出第 {i} 行");
+            // 窄带 = 左邻列延伸（不是滚动条的 90,90,90）
+            assert_eq!(&img[i * rb + (SW - 4) * 4..i * rb + (SW - 4) * 4 + 3], &img[i * rb + (SW - 21) * 4..i * rb + (SW - 21) * 4 + 3]);
+        }
     }
 }

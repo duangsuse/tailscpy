@@ -375,12 +375,21 @@ function renderPanel() {
     ${S.sc ? `<h4>滚动区</h4><div class="row"><span>区域 y / 高</span><span>${S.sc.rect[1]} / ${S.sc.rect[3]}</span></div><div class="row"><span>采集头 / 视口</span><span>${S.sc.head - 1048576} / ${Math.round(S.vy) - 1048576}${S.follow ? '（跟随）' : ''}</span></div><div class="row"><span>已知范围</span><span>${S.sc.ymin - 1048576} … ${S.sc.ymax - 1048576}</span></div><div class="row"><span>到顶 / 到底 / 缺行</span><span>${S.sc.atTop ? '是' : '否'} / ${S.sc.atBot ? '是' : '否'} / ${S.missing}</span></div>` : ''}
     <div class="row"><span>显示缩放</span><span>${((S.scale || 0) * 100).toFixed(0)}%${S.scale && S.scale !== 1 ? '（非 1:1，文字会被重采样）' : ''}</span></div>
     <div><button id="pr">网络探针 P5</button> <span>${S.probe}</span></div>
-    <h4>参数</h4>${ctl}<h4>操作</h4><button id="rc">断开重连</button>`
+    <h4>参数</h4>${ctl}<h4>操作</h4><button id="ex">导出长截屏 PNG</button> <button id="rc">断开重连</button>`
   p.querySelectorAll('input[type=range]').forEach((el: any) => el.onchange = () => { send({ Tune: { scope: 'Global', key: el.dataset.k, val: +el.value } }) })
   ;($('pr')).onclick = async () => { S.probe = '测量中…'; for (let i = 0; i < 40; i++) { send({ Ping: { t: Math.round(performance.now() * 1000) } }); await new Promise(r => setTimeout(r, 60)) }
     send({ Probe: { bytes: 4 << 20 } }) }
   ;($('rc')).onclick = () => { try { wt?.close() } catch {} }
+  ;($('ex')).onclick = exportLong
 }
+function exportLong() {   // 把 Scroll 画布已知范围导成一张长 PNG：没有内容的行透明，右缘窄带用左邻列延伸（没有滚动条残影）
+  const s = S.sc; if (!s) { toast('当前页没有滚动区'); return }
+  const y0 = s.ymin, y1 = Math.min(s.ymax, s.ymin + 30000); const n = wasm.rd_export(y0, y1)
+  const buf = new Uint8ClampedArray(wasm.memory.buffer.slice(wasm.rd_export_ptr(), wasm.rd_export_ptr() + n))
+  const c = document.createElement('canvas'); c.width = S.w; c.height = y1 - y0; c.getContext('2d')!.putImageData(new ImageData(buf, S.w, y1 - y0), 0, 0)
+  c.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b!); a.download = `长截屏-${S.pkg}.png`; a.click(); toast(`导出 ${S.w}×${y1 - y0}`) })
+}
+;(window as any).__hj.exportLong = exportLong
 setInterval(renderPanel, 1000)
 
 connect()

@@ -67,6 +67,8 @@ pub struct Core {
     last_resets: std::sync::atomic::AtomicU32,
     f_learned: std::sync::atomic::AtomicBool,
     timeouts: std::sync::atomic::AtomicU32,
+    /// 到边标记后的探测：A 还想往那个方向走时，每 1.5 s 试着滚一次（误判的“到边”能自愈；真到边时探测不会有任何帧变化）
+    probe_at: Mutex<Instant>,
 }
 
 pub const PAGE: PageId = 1;
@@ -81,7 +83,7 @@ impl Core {
             up_tx, up_rx: Mutex::new(up_rx), params: Mutex::new(Params::new()), apps: Mutex::new(vec![]), token,
             conn: Mutex::new(None), conn_seq: AtomicU64::new(0), enc: Mutex::new(None), frame: Mutex::new(Frame { buf: vec![], w: 0, h: 0 }),
             work: Mutex::new(Work::default()), cv: Condvar::new(), tx_seq: AtomicU64::new(0), sent: AtomicU64::new(0), acked: AtomicU64::new(0),
-            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None), view: Mutex::new(None), req: Mutex::new(None), wheel_f: Mutex::new(168.0), dbg_req: Mutex::new((0, 0, 0, 0.0)), last_resets: std::sync::atomic::AtomicU32::new(0), f_learned: std::sync::atomic::AtomicBool::new(false), timeouts: std::sync::atomic::AtomicU32::new(0),
+            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None), view: Mutex::new(None), req: Mutex::new(None), wheel_f: Mutex::new(168.0), dbg_req: Mutex::new((0, 0, 0, 0.0)), last_resets: std::sync::atomic::AtomicU32::new(0), f_learned: std::sync::atomic::AtomicBool::new(false), timeouts: std::sync::atomic::AtomicU32::new(0), probe_at: Mutex::new(Instant::now()),
         })
     }
 
@@ -189,7 +191,11 @@ impl Core {
         let diff = ty as i64 - head;
         if diff == 0 { return }
         let (top, bot) = enc.scroll_edges();
-        if (diff > 0 && bot) || (diff < 0 && top) { return }
+        if (diff > 0 && bot) || (diff < 0 && top) {
+            let mut pa = self.probe_at.lock().unwrap();
+            if pa.elapsed() < Duration::from_millis(1500) { return }
+            *pa = Instant::now();   // 探测一次：真到边没有帧变化，误判则会有位移并清掉标记
+        }
         // 滚轮因子还没量过（因容器而异，差 2 倍以上）：先走一小步量出来，免得第一步冲过头
         let max = if self.f_learned.load(Ordering::Relaxed) { (rect.h as i64 * 6 / 10).max(8) } else { 160 };
         let step = diff.clamp(-max, max) as i32;

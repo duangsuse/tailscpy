@@ -163,6 +163,8 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
             "net" -> return ok().put("net", session?.info ?: JSONObject()).put("allow", JSONArray((session?.allow ?: emptySet<String>()).toList())).put("active", session?.active ?: false)
             "net_stats" -> return ok().put("stats", JSONObject(Native.stats()))
             "va_attach" -> { Native.vaAttach(r.optBoolean("on", true)); return ok() }
+            "va_log" -> return ok().put("log", JSONArray(Native.vaLog()))
+            "va_dump" -> return ok().put("r", Native.vaDump(r.getString("path")))
             "va_state" -> return ok().put("va", JSONObject(Native.vaState(r.optBoolean("rows"))))
             "param" -> return ok().put("accepted", Native.param(r.getString("key"), r.getDouble("val")))
             "policy" -> { val s = session ?: return err("网络未启动"); s.allow.clear(); r.optJSONArray("allow")?.let { a -> for (i in 0 until a.length()) s.allow.add(a.getString(i)) }; return ok().put("allow", JSONArray(s.allow.toList())) }

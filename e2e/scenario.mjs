@@ -83,6 +83,10 @@ async function runOnce(sc, pkg) {
       if (!ctx.F) return { log, marks, skip: '容器不响应滚轮（需分步拖动回退）' }
       await h.ok({ cmd: 'mark', name: `step:scrollBy ${a}` })
       await scrollBy(h, ctx.c, ctx.F, a, S)
+    } else if (op === 'scrollEdge') {
+      ctx.c ??= await mainScrollable(h); if (!ctx.c) return { log, marks, skip: '没有竖直滚动容器' }
+      ctx.F ??= probeF(pkg) ?? await calibrate(h, ctx.c, S); if (!ctx.F) return { log, marks, skip: '容器不响应滚轮（需分步拖动回退）' }
+      await scrollBy(h, ctx.c, ctx.F, a * 30000, S)
     } else if (op === 'back') { await h.ok({ cmd: 'mark', name: 'step:back' }); await h.ok({ cmd: 'back', settle: { ...S, settle_ms: 700, timeout_ms: 5000 }, stack: true }) }
     else if (op === 'type') await h.ok({ cmd: 'text', s: a, settle: S })
     else throw new Error('未知原语 ' + op)
@@ -107,19 +111,19 @@ const same = (m, a, b) => m[a] && m[b] && diffPng(m[a], m[b], IGN).ratio <= 0.00
 // ───────── 实跑模式 ─────────
 const wire = msg => h.ok({ cmd: 'wire', msg })
 const vaState = async rows => (await h.ok({ cmd: 'va_state', rows })).va
-async function vaIdle(timeout = 12000) {   // 链路空闲（连续 3 次）
+async function vaIdle(timeout = 12000, quiet = 400) {   // 链路空闲（连续 2 次），且 B 的画面已经安静了 quiet ms（冷启动 / 加载中的中间状态不算“稳定”）
   const t0 = Date.now(); let ok = 0
-  while (Date.now() - t0 < timeout) { const v = await vaState(false); ok = v.idle ? ok + 1 : 0; if (ok >= 2) return v; await sleep(100) }
+  while (Date.now() - t0 < timeout) { const v = await vaState(false); ok = v.idle && v.quiet_ms >= quiet ? ok + 1 : 0; if (ok >= 2) return v; await sleep(100) }
   return await vaState(false)
 }
 /** 扮演 A 的视口：不断报同一个目标，直到采集头到位或到边（B 在换页 / 加载时会丢掉旧目标，A 本来就会重报） */
 async function moveHead(target, timeoutMs = 9000) {
-  const t0 = Date.now()
+  const t0 = Date.now(); let edgeN = 0
   while (Date.now() - t0 < timeoutMs) {
     await wire({ View: { page: 1, region: 1, y: target, vy: 0 } }); await sleep(250)
     const v = await vaState(false); if (!v.scroll) break
     if (Math.abs(v.scroll.head - target) <= 2) break
-    if ((target > v.scroll.head && v.scroll.at_bottom) || (target < v.scroll.head && v.scroll.at_top)) break
+    if ((target > v.scroll.head && v.scroll.at_bottom) || (target < v.scroll.head && v.scroll.at_top)) { if (++edgeN >= 12) break } else edgeN = 0   // 到边标记要连续 ~3 s 都在才信（B 会每 1.5 s 探测一次）
   }
   return await vaIdle()
 }
@@ -128,7 +132,7 @@ async function runLive(sc, pkg) {
   await h.ok({ cmd: 'policy', allow: sc.policy ?? ['[popup]'] }); await h.ok({ cmd: 'param', key: 'verify', val: 1 })   // 通用场景会点进任意子页（含设置的搜索），所以放行临时窗口；off-whitelist 之类的场景用 sc.policy 覆盖
   await h.ok({ cmd: 'va_attach', on: true })
   const snap = async () => { let v = await vaState(true); for (let i = 0; i < 20 && !(v.idle && !v.diff_px); i++) { await sleep(80); v = await vaState(true) }   // 光标闪烁等会让 B 的帧在两次读取之间变掉：同一次读取里空闲且一致才算数
-    return { rows: v.rows, blank: v.blank, diff_px: v.diff_px, verify_fail: v.verify_fail, rx: v.rx_bytes, err: v.err, comparable: v.comparable } }
+    return { rows: v.rows, blank: v.blank, diff_px: v.diff_px, verify_fail: v.verify_fail, last_vf: v.last_vf, rx: v.rx_bytes, err: v.err, comparable: v.comparable } }
   let c = null
   for (const [op, a] of sc.steps) {
     const t0 = Date.now()
@@ -137,10 +141,13 @@ async function runLive(sc, pkg) {
       const t = Date.now(); while (Date.now() - t < 20000 && !((await vaState(false)).txs > 0)) await sleep(150)
     } else if (op === 'waitStable') {
       let v, n = 0
-      do { v = await vaIdle(); n++; if (v.blank && n < 5) await sleep(800) } while (v.blank && n < 5)
+      do { v = await vaIdle(12000, 450); n++; if (v.blank && n < 5) await sleep(800) } while (v.blank && n < 5)
       if (!first) first = { bytes: v.rx_bytes, ms: Date.now() - t0 }
       log.push(`waitStable ${v.idle ? '空闲' : '超时未空闲'} rx=${v.rx_bytes}B`)
-    } else if (op === 'mark') { await vaIdle(); marks[a] = await snap() }
+    } else if (op === 'mark') {
+      await vaIdle(); marks[a] = await snap()
+      if (process.env.HJ_DUMP) { await h.ok({ cmd: 'frame_file', path: `/data/local/tmp/hj/mark-${a}.png` }); await h.ok({ cmd: 'va_dump', path: `/data/local/tmp/hj/mark-${a}.rgba` }) }   // 调试：B 的帧和 A 的画面各存一份
+    }
     else if (op === 'tap') {
       c ??= await mainScrollable(h)
       const p = a.first ? await resolveFirst(c) : await resolveBy(a)
@@ -162,6 +169,13 @@ async function runLive(sc, pkg) {
       }
       log.push(`scrollBy ${a} 实际 ${moved}px`)
     }
+    else if (op === 'scrollEdge') {   // 一直滚到头（-1 = 顶，1 = 底）。吸顶 / 折叠标题栏会让采集头坐标跳一下，所以不按位移量，按“到边”判
+      let v = await vaIdle(), stuck = 0
+      for (let i = 0; i < 12 && stuck < 2; i++) {
+        const before = v.scroll.head; v = await moveHead(before + a * 700)
+        if ((a < 0 && v.scroll.at_top) || (a > 0 && v.scroll.at_bottom) || v.scroll.head === before) stuck++; else stuck = 0
+      }
+    }
     else throw new Error('未知原语 ' + op)
     log.push(`${op}${a !== undefined ? ' ' + JSON.stringify(a) : ''} ${Date.now() - t0}ms`)
   }
@@ -176,7 +190,7 @@ const liveProps = r => {
   const bad = []
   for (const [k, m] of Object.entries({ ...r.marks, final: r.final })) {
     if (m.comparable && m.diff_px > 0) bad.push(`${k}: A 画布与 B 帧有 ${m.diff_px} 个像素不同`)
-    if (m.verify_fail > 0) bad.push(`${k}: Verify 失败 ${m.verify_fail} 次`)
+    if (m.verify_fail > 0) bad.push(`${k}: Verify 失败 ${m.verify_fail} 次 ${String(m.last_vf || '').slice(0, 300)}`)
     if (m.err) bad.push(`${k}: 解码出错 ${m.err}`)
   }
   return bad.slice(0, 3).join('；')

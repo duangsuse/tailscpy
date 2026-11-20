@@ -262,4 +262,19 @@ impl Canvas {
             }
         }
     }
+
+    /// 导出 Scroll 画布 [y0, y1) 行（长截屏，70 §5）：RGBA，没有内容的行是全透明；右缘窄带用左邻列延伸（没有滚动条残影——窄带从来没被写过）。
+    pub fn export_scroll(&self, y0: i32, y1: i32) -> Vec<u8> {
+        let (w, rb) = (self.w, self.w * 4); let n = (y1 - y0).max(0) as usize;
+        let mut out = vec![0u8; n * rb];
+        let Some(sc) = self.scroll.as_ref() else { return out };
+        let sb = self.sb.min(w.saturating_sub(1));
+        for i in 0..n {
+            if let Some((px, _)) = sc.row(y0 + i as i32, w) {
+                let dst = &mut out[i * rb..(i + 1) * rb]; dst.copy_from_slice(px);
+                if sb > 0 { let src: [u8; 4] = px[(w - sb - 1) * 4..(w - sb) * 4].try_into().unwrap(); for x in w - sb..w { dst[x * 4..x * 4 + 4].copy_from_slice(&src) } }
+            }
+        }
+        out
+    }
 }
