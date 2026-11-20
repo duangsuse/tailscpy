@@ -401,7 +401,7 @@ impl Encoder {
         let inplace: Vec<usize> = inplace.into_iter().filter(|&y| !in_img(y)).collect::<Vec<_>>();
         let n_img_rows = (0..h).filter(|&y| !scroll_rows.contains(&y) && self.a_valid[y] && self.a_hash[y] != self.cur_hash[y] && in_img(y)).count();
         let big = inplace.len() as f64 > p.get("overlay_max_frac") * fixed_rows as f64;
-        if page_chg { for o in std::mem::take(&mut self.ovs) { if o.region == 0 { ops.push(Op::OverlayDrop { id: o.id }) } else { self.ovs.push(o) } } }
+        if page_chg { self.defer_sent.clear(); self.img_sig.retain(|k, _| k.0 != 0); for o in std::mem::take(&mut self.ovs) { if o.region == 0 { ops.push(Op::OverlayDrop { id: o.id }) } else { self.ovs.push(o) } } }
         let _ = n_img_rows;
         let use_ov = !page_chg && !big && p.get("overlay") > 0.5;
         let cand_f: Vec<(i64, usize, u64)> = if use_ov { inplace.iter().map(|&y| (y as i64, y, self.cur_hash[y])).collect() } else { vec![] };
@@ -534,7 +534,7 @@ impl Encoder {
             }
         }
         if s.head < 1024 || s.head > 2 * ORIGIN as i64 { reset = true }
-        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); self.ovs.retain(|o| o.region != 1); self.img_sig.retain(|k, _| k.0 != 1); let s = self.scroll.as_mut().unwrap(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
+        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); self.ovs.retain(|o| o.region != 1); self.img_sig.retain(|k, _| k.0 != 1); self.defer_sent.clear(); let s = self.scroll.as_mut().unwrap(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
         let s = self.scroll.as_mut().unwrap();
         // 缺的行（内容坐标）
         let mut missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();
