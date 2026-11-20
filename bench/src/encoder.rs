@@ -147,7 +147,8 @@ impl Encoder for RdEnc {
         let ap = self.cv.apply(&ops)?;
         if !ap.images.is_empty() { return Err("重放里不该出现 JPEG 图片".into()); }
         if !ap.verify_fail.is_empty() { return Err(format!("A 端校验失败 {:?}", ap.verify_fail)); }
-        canvas.copy_from_slice(&self.cv.px);
+        self.cv.compose(0);   // 画布 + Overlay 才是 A 上看到的
+        canvas.copy_from_slice(&self.cv.view);
         Ok(())
     }
 }

@@ -157,12 +157,12 @@ function addDirty(x: number, y: number, w: number, h: number) {
 }
 let rafPending = false
 function scheduleRender() { if (!rafPending) { rafPending = true; requestAnimationFrame(render) } }
-const img = () => new ImageData(new Uint8ClampedArray(wasm.memory.buffer, S.sc ? wasm.rd_view_ptr() : wasm.rd_canvas_ptr(), S.w * S.h * 4), S.w, S.h)
+const img = () => new ImageData(new Uint8ClampedArray(wasm.memory.buffer, wasm.rd_view_ptr(), S.w * S.h * 4), S.w, S.h)
 function render() {
   rafPending = false
   if (!S.w) return
-  if (S.sc) { S.missing = wasm.rd_compose(Math.round(S.vy)); ctx.putImageData(img(), 0, 0); dirty = null }
-  else if (dirty) { const [x0, y0, x1, y1] = dirty; dirty = null; ctx.putImageData(img(), 0, 0, x0, y0, x1 - x0, y1 - y0) }
+  // 画布 + 视口处的滚动行 + Overlay 合成一帧（没有 Scroll 区域时视口无意义）
+  S.missing = wasm.rd_compose(S.sc ? Math.round(S.vy) : 0); ctx.putImageData(img(), 0, 0); dirty = null
   drawOverlay()
 }
 function canvasHash(): string {   // 测试用：整个画布的快速摘要
@@ -173,8 +173,8 @@ function canvasHash(): string {   // 测试用：整个画布的快速摘要
 }
 function viewHash(): string {   // 测试用：当前显示的画面（含本地滚动后的合成）
   if (!S.w) return ''
-  if (S.sc) wasm.rd_compose(Math.round(S.vy))
-  const b = new Uint8Array(wasm.memory.buffer, S.sc ? wasm.rd_view_ptr() : wasm.rd_canvas_ptr(), S.w * S.h * 4); let h = 2166136261 >>> 0
+  wasm.rd_compose(S.sc ? Math.round(S.vy) : 0)
+  const b = new Uint8Array(wasm.memory.buffer, wasm.rd_view_ptr(), S.w * S.h * 4); let h = 2166136261 >>> 0
   for (let i = 0; i < b.length; i += 97) h = Math.imul(h ^ b[i], 16777619) >>> 0
   return h.toString(16)
 }
@@ -256,8 +256,8 @@ function drawOverlay() {
     } }
 }
 function drawLayers() {   // 图 / 文 / 视三类区：按每个像素最后一次写入的层着色（bg 绿、lit 紫）；滚动区按当前视口合成
-  if (S.sc) wasm.rd_compose(Math.round(S.vy))
-  const l = new Uint8Array(wasm.memory.buffer, S.sc ? wasm.rd_view_layer_ptr() : wasm.rd_layer_ptr(), S.w * S.h); const im = octx.createImageData(S.w, S.h); const d = new Uint32Array(im.data.buffer)
+  wasm.rd_compose(S.sc ? Math.round(S.vy) : 0)
+  const l = new Uint8Array(wasm.memory.buffer, wasm.rd_view_layer_ptr(), S.w * S.h); const im = octx.createImageData(S.w, S.h); const d = new Uint32Array(im.data.buffer)
   for (let i = 0; i < l.length; i++) d[i] = l[i] === 1 ? 0x3c40ff40 : l[i] === 2 ? 0x50ff40ff : 0
   octx.putImageData(im, 0, 0)
 }

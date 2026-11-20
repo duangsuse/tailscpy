@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 #[derive(Default)]
-pub struct VaState { pub canvas: Option<Canvas>, pub rx_bytes: u64, pub applied_seq: u64, pub txs: u64, pub verify_fail: u64, pub images: u64, pub err: String }
+pub struct VaState { pub canvas: Option<Canvas>, pub rx_bytes: u64, pub applied_seq: u64, pub txs: u64, pub verify_fail: u64, pub images: u64, pub err: String, pub last_vf: String }
 
 pub fn attach(core: &Arc<Core>) {
     let id = core.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -39,7 +39,7 @@ pub fn attach(core: &Arc<Core>) {
                 }
                 Down::Tx { seq, ops, .. } => {
                     match va.canvas.as_mut().map(|cv| cv.apply(&ops)) {
-                        Some(Ok(ap)) => { va.verify_fail += ap.verify_fail.len() as u64; va.images += ap.images.len() as u64; va.txs += 1 }
+                        Some(Ok(ap)) => { if !ap.verify_fail.is_empty() { va.last_vf = format!("{:?} ops={:?}", ap.verify_fail, ops.iter().map(|o| format!("{}:{:?}", o.kind(), o.dst().map(|d| (d.region, d.y, d.h)))).collect::<Vec<_>>()) } va.verify_fail += ap.verify_fail.len() as u64; va.images += ap.images.len() as u64; va.txs += 1 }
                         Some(Err(e)) => va.err = e,
                         None => va.err = "Tx 先于 Page".into(),
                     }
@@ -61,20 +61,20 @@ pub fn detach(core: &Arc<Core>) {
 
 /// 状态 + 与 B 当前帧的差异（排除有损像素）+ 每行 hash（有损像素置 0 后算，场景里比较两次画面是否一致用）
 pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
-    let idle = core.is_idle();
+    let why = core.idle_why(); let idle = why.is_empty();
     let mut g = core.va.lock().unwrap();
     let Some(va) = g.as_mut() else { return serde_json::json!({"attached": false}) };
-    let mut j = serde_json::json!({"attached": true, "idle": idle, "rx_bytes": va.rx_bytes, "txs": va.txs, "applied_seq": va.applied_seq,
-        "tx_seq": core.tx_seq.load(Ordering::Relaxed), "verify_fail": va.verify_fail, "images": va.images, "err": va.err});
+    let mut j = serde_json::json!({"attached": true, "idle": idle, "idle_why": why, "rx_bytes": va.rx_bytes, "txs": va.txs, "applied_seq": va.applied_seq,
+        "tx_seq": core.tx_seq.load(Ordering::Relaxed), "verify_fail": va.verify_fail, "last_vf": va.last_vf, "images": va.images, "err": va.err});
     let (rx_bytes_unused, _) = (0, 0); let _ = rx_bytes_unused;
     if let Some(cv) = va.canvas.as_mut() {
         // Scroll 画布：A 的视口跟随采集头，合成后再和 B 帧比
         let head = cv.scroll.as_ref().map(|s| s.head);
         let scroll_rect = cv.scroll.as_ref().map(|s| s.rect);
-        if let Some(hd) = head { cv.compose(hd); }
+        cv.compose(head.unwrap_or(0));   // 画布 + 视口处的滚动行 + Overlay：A 上实际看到的
         let (w, h) = (cv.w, cv.h); let rb = w * 4;
         let sbw = if scroll_rect.is_some() { cv.sb } else { 0 };
-        let (px, layer): (&[u8], &[u8]) = if head.is_some() { (&cv.view, &cv.view_layer) } else { (&cv.px, &cv.layer) };
+        let (px, layer): (&[u8], &[u8]) = (&cv.view, &cv.view_layer);
         let f = core.frame.lock().unwrap();
         let comparable = f.w == w && f.h == h;
         let (mut diff, mut lit) = (0u64, 0u64); let mut bb = [usize::MAX, usize::MAX, 0usize, 0usize];

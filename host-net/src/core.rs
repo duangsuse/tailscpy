@@ -31,7 +31,7 @@ pub struct StatsAcc {
 }
 
 #[derive(Default)]
-struct Work { dirty: bool, kick: bool, last: Option<Instant>, first: Option<Instant> }
+struct Work { dirty: bool, kick: bool, soft: bool, last: Option<Instant>, first: Option<Instant> }
 
 pub struct Frame { pub buf: Vec<u8>, pub w: usize, pub h: usize }
 
@@ -96,6 +96,8 @@ impl Core {
         drop(w); self.cv.notify_all()
     }
     pub fn kick(&self) { self.work.lock().unwrap().kick = true; self.cv.notify_all() }
+    /// 只是回来看看 Overlay 该不该 Commit / Drop：让编码线程转一圈，但不算“画面在变”（is_idle 不看它）
+    pub fn kick_soft(&self) { self.work.lock().unwrap().soft = true; self.cv.notify_all() }
     pub fn wake(&self) { self.cv.notify_all() }
 
     pub fn inflight(&self) -> u64 { self.sent.load(Ordering::Relaxed).saturating_sub(self.acked.load(Ordering::Relaxed)) }
@@ -143,18 +145,23 @@ impl Core {
     }
 
     /// 链路空闲：没有待编的帧 / 催促 / 压后条带，发出的都已被 A 应用，且最近一次推帧已过去一段时间
-    pub fn is_idle(&self) -> bool {
+    pub fn is_idle(&self) -> bool { self.idle_why().is_empty() }
+
+    /// 不空闲的原因（空串 = 空闲）：调试口 / runner 看卡在哪
+    pub fn idle_why(&self) -> &'static str {
         let w = self.work.lock().unwrap();
         // 滚动：没有在途的滚动请求，且采集头已经追上 A 报的视口。（锁一个取一个、立刻放：drive_scroll 是 enc → req → view 的顺序）
-        if self.req.lock().unwrap().is_some() { return false }
+        if self.req.lock().unwrap().is_some() { return "scroll_req" }
         let view = *self.view.lock().unwrap();
         let sc = self.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, _)| (h, e.scroll_edges())));
         if let (Some(v), Some((head, (top, bot)))) = (view, sc) {
-            let diff = v as i64 - head; if diff != 0 && !((diff > 0 && bot) || (diff < 0 && top)) { return false }
+            let diff = v as i64 - head; if diff != 0 && !((diff > 0 && bot) || (diff < 0 && top)) { return "head_not_at_view" }
         }
         let applied = self.va.lock().unwrap().as_ref().map_or(self.tx_seq.load(Ordering::Relaxed), |v| v.applied_seq);
-        !w.dirty && !w.kick && !self.deferring.load(Ordering::Relaxed) && applied == self.tx_seq.load(Ordering::Relaxed)
-            && self.last_push.lock().unwrap().elapsed() >= Duration::from_millis(250)
+        if w.dirty { return "dirty" } if w.kick { return "kick" } if self.deferring.load(Ordering::Relaxed) { return "deferring" }
+        if applied != self.tx_seq.load(Ordering::Relaxed) { return "unapplied" }
+        if self.last_push.lock().unwrap().elapsed() < Duration::from_millis(150) { return "recent_frame" }
+        ""
     }
 
     pub fn set_view(&self, y: i32) { *self.view.lock().unwrap() = Some(y); self.kick() }
@@ -246,7 +253,7 @@ pub fn encoder_loop(core: Arc<Core>) {
         {
             let mut w = core.work.lock().unwrap();
             loop {
-                let ready = (w.dirty || w.kick) && core.conn.lock().unwrap().is_some() && core.enc.lock().unwrap().is_some();
+                let ready = (w.dirty || w.kick || w.soft) && core.conn.lock().unwrap().is_some() && core.enc.lock().unwrap().is_some();
                 if ready { break }
                 // 有在途的滚动请求却一直没有帧响应（滚不动了）：到时间要能判超时，不能等下一帧
                 if core.req.lock().unwrap().is_some() { drop(w); core.drive_scroll(0); std::thread::sleep(Duration::from_millis(30)); w = core.work.lock().unwrap(); continue }
@@ -273,22 +280,22 @@ pub fn encoder_loop(core: Arc<Core>) {
             let _ = core.cv.wait_timeout(w, Duration::from_millis(10)).unwrap();
             continue;
         }
-        { let mut w = core.work.lock().unwrap(); w.dirty = false; w.kick = false; w.first = None; }
+        { let mut w = core.work.lock().unwrap(); w.dirty = false; w.kick = false; w.soft = false; w.first = None; }
         // 3. 编
         let p = core.params.lock().unwrap().clone();
         let t = Instant::now();
-        let (ops, rows, defer, regions, shift, resets) = {
+        let (ops, rows, defer, regions, shift, resets, ov_pending) = {
             let mut g = core.enc.lock().unwrap();
             let Some(enc) = g.as_mut() else { continue };
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
-            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy, enc.n_reset)
+            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy, enc.n_reset, o.ov_pending)
         };
-        let more = defer; core.deferring.store(more, Ordering::Relaxed);
+        let more = defer; core.deferring.store(defer, Ordering::Relaxed);
         // 换页（滚动画布被清空）：旧视口目标作废，等 A 重新报
         if resets != core.last_resets.swap(resets, Ordering::Relaxed) { *core.view.lock().unwrap() = None; *core.req.lock().unwrap() = None }
         core.drive_scroll(shift);
         if let Some(rs) = regions { let seq = core.next_seq(); core.send_tx(seq, &Down::Regions { seq, page: PAGE, regions: rs }); }
-        if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } continue }
+        if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } else if ov_pending { std::thread::sleep(Duration::from_millis(50)); core.kick_soft() } continue }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         // 4. 统计（逐 Op 的线上字节）
         let mut layers = [0u64; 3]; let mut kinds: Vec<(&'static str, u64)> = vec![];
@@ -308,5 +315,6 @@ pub fn encoder_loop(core: Arc<Core>) {
             s.frames += 1; s.rows_sent += rows as u64; s.enc_ms_last = ms; s.enc_ms_total += ms; s.tx_bytes += n; s.tx_msgs += 1;
         }
         if more { std::thread::sleep(Duration::from_millis(50)); core.kick() }   // 有压后的条带：过一会儿再编（等 A11y 提案）
+        else if ov_pending { std::thread::sleep(Duration::from_millis(50)); core.kick_soft() }   // 有在途的 Overlay：回来判断 Commit / Drop
     }
 }

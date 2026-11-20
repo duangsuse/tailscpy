@@ -41,7 +41,11 @@ pub struct Applied {
     pub verify_fail: Vec<(u32, u32)>,
 }
 
+/// 一个 Overlay：浮在画布上的临时补丁（20 §5），不进画布；Commit 才写进去
+struct OverlayRec { region: u16, patches: Vec<(Dst, Vec<u8>)> }
+
 pub struct Canvas {
+    overlays: HashMap<u32, OverlayRec>,
     pub w: usize,
     pub h: usize,
     pub px: Vec<u8>,
@@ -86,7 +90,7 @@ impl ScrollCanvas {
 }
 
 impl Canvas {
-    pub fn new(w: usize, h: usize) -> Canvas { Canvas { w, h, px: vec![0; w * h * 4], layer: vec![0; w * h], scroll: None, sb: 0, view: vec![0; w * h * 4], view_layer: vec![0; w * h] } }
+    pub fn new(w: usize, h: usize) -> Canvas { Canvas { w, h, px: vec![0; w * h * 4], layer: vec![0; w * h], overlays: HashMap::new(), scroll: None, sb: 0, view: vec![0; w * h * 4], view_layer: vec![0; w * h] } }
     pub fn row(&self, y: usize) -> &[u8] { &self.px[y * self.w * 4..(y + 1) * self.w * 4] }
 
     /// 区域列表（`Page` / `Regions`）：有 Scroll 区域就建（矩形变了就重建），没有就撤。
@@ -95,9 +99,9 @@ impl Canvas {
             Some(r) => match self.scroll.as_mut() {
                 // 只是上下缩了（吸顶 / 吸底的行被切成 Fixed）：画布内容保留；换了别的矩形（换页）才重建
                 Some(s) if s.rect.x == r.rect.x && s.rect.w == r.rect.w => s.rect = r.rect,
-                _ => self.scroll = Some(ScrollCanvas::new(r.rect)),
+                _ => { self.scroll = Some(ScrollCanvas::new(r.rect)); self.overlays.retain(|_, o| o.region != 1) }
             },
-            None => self.scroll = None,
+            None => { self.scroll = None; self.overlays.retain(|_, o| o.region != 1) }
         }
     }
 
@@ -170,9 +174,20 @@ impl Canvas {
                     sc.set_layer(cw, &Dst { region: 1, x: dst.x + c as u32, y: dst.y + r as u32, w: 1, h: 1 }, LAYER_LIT) } } }
                 ap.rects.push((*dst, "Copy", LAYER_BG));
             }
+            Op::Overlay { id, dst, ops } => {
+                self.check(dst)?;
+                let mut patches = vec![];
+                for o in ops { patches.push(self.decode_patch(o)?) }
+                self.overlays.insert(*id, OverlayRec { region: dst.region, patches });
+                ap.rects.push((*dst, "Overlay", LAYER_BG));
+            }
+            Op::OverlayDrop { id } => { self.overlays.remove(id); }
+            Op::Commit { id } => {
+                if let Some(o) = self.overlays.remove(id) { for (d, rgba) in &o.patches { self.blit(d, rgba, LAYER_BG) } }
+            }
             Op::Clear { region } => match region {
-                1 => { if let Some(s) = self.scroll.as_mut() { s.clear() } }
-                _ => { self.px.fill(0); self.layer.fill(0) }
+                1 => { if let Some(s) = self.scroll.as_mut() { s.clear() } self.overlays.retain(|_, o| o.region != 1) }
+                _ => { self.px.fill(0); self.layer.fill(0); self.overlays.retain(|_, o| o.region != 0) }
             },
             Op::Head { region: 1, y } => { if let Some(s) = self.scroll.as_mut() { s.head = *y } }
             Op::Known { region: 1, at_top, at_bottom, total_h, .. } => { if let Some(s) = self.scroll.as_mut() { s.at_top = *at_top; s.at_bottom = *at_bottom; s.total_h = *total_h } }
@@ -193,11 +208,24 @@ impl Canvas {
         Ok(())
     }
 
+    /// Overlay 里的一条 Fill / Lit → (目标, RGBA)
+    fn decode_patch(&self, op: &Op) -> Result<(Dst, Vec<u8>), String> {
+        match op {
+            Op::Fill { dst, color } => { self.check(dst)?; Ok((*dst, (0..dst.w * dst.h).flat_map(|_| [color[0], color[1], color[2], 255]).collect())) }
+            Op::Lit { dst, enc, data, .. } => {
+                self.check(dst)?;
+                let raw = lit::zstd_decode(data)?; let (w, h) = (dst.w as usize, dst.h as usize);
+                Ok((*dst, match enc { LitEnc::Palette => lit::palette_decode(&raw, w, h)?, LitEnc::Residual => lit::residual_decode(&raw, w, h)?, LitEnc::Raw => lit::raw_decode(&raw, w, h)? }))
+            }
+            o => Err(format!("Overlay 里不支持 {}", o.kind())),
+        }
+    }
+
     /// 把 Fixed 画布和视口 `vy`（画布 y，滚动区第一行）处的滚动行合成一帧屏幕，放进 `view`。
     /// 滚动区里没有内容的行用占位色（取上一行已有内容的首像素，没有就深灰）；右缘窄带（`sb`）用左邻列延伸。返回缺行数。
     pub fn compose(&mut self, vy: i32) -> usize {
         self.view.copy_from_slice(&self.px); self.view_layer.copy_from_slice(&self.layer);
-        let Some(sc) = self.scroll.as_ref() else { return 0 };
+        let Some(sc) = self.scroll.as_ref() else { self.draw_overlays(0); return 0 };
         let (w, rb) = (self.w, self.w * 4); let r = sc.rect;
         let mut missing = 0; let mut ph = [0x30u8, 0x30, 0x30, 255];
         for i in 0..r.h as usize {
@@ -212,6 +240,26 @@ impl Canvas {
                 None => { missing += 1; self.view_layer[y * w..(y + 1) * w].fill(0); for x in 0..w { dst[x * 4..x * 4 + 4].copy_from_slice(&ph) } }
             }
         }
+        self.draw_overlays(vy);
         missing
+    }
+
+    /// Overlay 画在合成结果的最上面（区域 1 的按视口换算成屏幕行）
+    fn draw_overlays(&mut self, vy: i32) {
+        let (w, rb) = (self.w, self.w * 4);
+        let rect = self.scroll.as_ref().map(|s| s.rect);
+        let mut ids: Vec<u32> = self.overlays.keys().copied().collect(); ids.sort();
+        for id in ids {
+            let o = &self.overlays[&id];
+            for (d, rgba) in &o.patches {
+                for r in 0..d.h as usize {
+                    let sy = if o.region == 1 { let Some(rc) = rect else { continue }; let k = d.y as i32 + r as i32 - vy; if k < 0 || k >= rc.h as i32 { continue } rc.y as usize + k as usize } else { d.y as usize + r };
+                    if sy >= self.h { continue }
+                    let (x, pw) = (d.x as usize, d.w as usize); if x + pw > w { continue }
+                    self.view[sy * rb + x * 4..sy * rb + (x + pw) * 4].copy_from_slice(&rgba[r * pw * 4..(r + 1) * pw * 4]);
+                    self.view_layer[sy * w + x..sy * w + x + pw].fill(LAYER_BG);
+                }
+            }
+        }
     }
 }

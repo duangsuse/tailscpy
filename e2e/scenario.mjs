@@ -41,6 +41,18 @@ async function resolveFirst(c) {   // 主列表里第一个可点、非返回/�
   return pick && { x: Math.round((pick.b[0] + pick.b[2]) / 2), y: Math.round((pick.b[1] + pick.b[3]) / 2), desc: pick.text || pick.desc || pick.id }
 }
 
+/** 按 desc / text / id 后缀找节点（不要求可点：有的按钮只是 ImageView 外面包了可点父节点），取中心 */
+async function resolveBy(sel) {
+  for (let i = 0; i < 12; i++) {
+    if (i) await sleep(250)
+    const t = (await h.ok({ cmd: 'tree', full: true })).tree; let hit = null
+    const walk = n => { if (!hit && !n.hidden && n.b[3] > n.b[1] && ((sel.desc && n.desc === sel.desc) || (sel.text && n.text === sel.text) || (sel.id && n.id?.endsWith(sel.id)))) hit = n; (n.kids || []).forEach(walk) }
+    t.windows.forEach(w => w.root && walk(w.root))
+    if (hit) return { x: Math.round((hit.b[0] + hit.b[2]) / 2), y: Math.round((hit.b[1] + hit.b[3]) / 2), desc: hit.desc || hit.text || hit.id }
+  }
+  return null
+}
+
 async function runOnce(sc, pkg) {
   const marks = {}, log = []
   const ctx = { c: null, F: null, final: null }
@@ -97,7 +109,7 @@ const wire = msg => h.ok({ cmd: 'wire', msg })
 const vaState = async rows => (await h.ok({ cmd: 'va_state', rows })).va
 async function vaIdle(timeout = 12000) {   // 链路空闲（连续 3 次）
   const t0 = Date.now(); let ok = 0
-  while (Date.now() - t0 < timeout) { const v = await vaState(false); ok = v.idle ? ok + 1 : 0; if (ok >= 3) return v; await sleep(120) }
+  while (Date.now() - t0 < timeout) { const v = await vaState(false); ok = v.idle ? ok + 1 : 0; if (ok >= 2) return v; await sleep(100) }
   return await vaState(false)
 }
 /** 扮演 A 的视口：不断报同一个目标，直到采集头到位或到边（B 在换页 / 加载时会丢掉旧目标，A 本来就会重报） */
@@ -115,7 +127,8 @@ async function runLive(sc, pkg) {
   const marks = {}, log = []; let first = null
   await h.ok({ cmd: 'policy', allow: sc.policy ?? ['[popup]'] }); await h.ok({ cmd: 'param', key: 'verify', val: 1 })   // 通用场景会点进任意子页（含设置的搜索），所以放行临时窗口；off-whitelist 之类的场景用 sc.policy 覆盖
   await h.ok({ cmd: 'va_attach', on: true })
-  const snap = async () => { const v = await vaState(true); return { rows: v.rows, blank: v.blank, diff_px: v.diff_px, verify_fail: v.verify_fail, rx: v.rx_bytes, err: v.err, comparable: v.comparable } }
+  const snap = async () => { let v = await vaState(true); for (let i = 0; i < 20 && !(v.idle && !v.diff_px); i++) { await sleep(80); v = await vaState(true) }   // 光标闪烁等会让 B 的帧在两次读取之间变掉：同一次读取里空闲且一致才算数
+    return { rows: v.rows, blank: v.blank, diff_px: v.diff_px, verify_fail: v.verify_fail, rx: v.rx_bytes, err: v.err, comparable: v.comparable } }
   let c = null
   for (const [op, a] of sc.steps) {
     const t0 = Date.now()
@@ -130,7 +143,7 @@ async function runLive(sc, pkg) {
     } else if (op === 'mark') { await vaIdle(); marks[a] = await snap() }
     else if (op === 'tap') {
       c ??= await mainScrollable(h)
-      const p = a.first ? await resolveFirst(c) : null
+      const p = a.first ? await resolveFirst(c) : await resolveBy(a)
       if (!p) return { log, marks, skip: '没有可点节点' }
       await wire({ Tap: { page: 1, at: { region: 0, x: p.x, y: p.y } } })
     } else if (op === 'back') { await wire('Back'); await sleep(300) }
@@ -172,7 +185,7 @@ const liveProps = r => {
 let fail = 0
 for (const n of names) {
   const sc = (await import(path.join(here, 'scenarios', n + '.mjs'))).default
-  for (const pkg of pkgs) {
+  for (const pkg of (sc.pkgs && !pkgArg.length ? sc.pkgs.filter(x => pkgs.includes(x)) : pkgs)) {
     const runs = []
     for (let k = 0; k < (TWICE ? 2 : 1); k++) {
       const r = await (LIVE ? runLive(sc, pkg) : runOnce(sc, pkg)).catch(e => ({ log: [], marks: {}, err: String(e.message || e) }))

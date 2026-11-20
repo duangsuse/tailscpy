@@ -39,6 +39,9 @@ struct ScrollEnc {
     last_head: i64,
 }
 
+/// 一个在途的 Overlay（B 端记账）：它盖住的行（键 = Fixed 的屏幕 y / Scroll 的画布 y）及发出时每行的 hash
+struct Ov { id: u32, region: u16, k0: i64, hashes: Vec<u64>, since: u64 }
+
 pub struct Encoder {
     pub w: usize,
     pub h: usize,
@@ -60,6 +63,9 @@ pub struct Encoder {
     pub last_dy: i32,
     /// 在这个时刻之前允许换 Scroll 区域（页面刚换过）；之后即使提案变了也保持：折叠标题栏一类会让 A11y 容器边界在滚动中变化（20 §3：区域在页面生命周期内固定）
     allow_change_until: u64,
+    ovs: Vec<Ov>,
+    next_ov: u32,
+    last_shift_ms: u64,
     /// 调试统计：认出位移 / 判为换页 / 认不出位移但变化不大的帧数
     pub n_shift: u32,
     pub n_reset: u32,
@@ -74,7 +80,9 @@ pub struct Encoder {
 
 /// `defer`：有“像素上像照片、但 A11y 还没确认”的条带被压后了（图片先别当无损发），调用方过一会儿要再编一次
 /// `regions`：区域有变化时给出新的区域表，调用方必须在这批 Op 之前先发 `Down::Regions`
-pub struct Out { pub ops: Vec<Op>, pub rows: u32, pub defer: bool, pub regions: Option<Vec<Region>> }
+pub struct Out { pub ops: Vec<Op>, pub rows: u32, pub defer: bool, pub regions: Option<Vec<Region>>,
+    /// 还有在途的 Overlay：过一会儿要回来判断 Commit / Drop（但这不影响“画面是否稳定”）
+    pub ov_pending: bool }
 
 fn remap(op: Op, region: u16, f: &dyn Fn(u32) -> u32) -> Op {
     let m = |d: Dst| Dst { region, y: f(d.y), ..d };
@@ -91,13 +99,13 @@ impl Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], info: vec![false; h], stale: vec![true; h],
             a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], fmask: Mask::full(w as u32), hints: vec![], defer_since: None,
-            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
+            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, ovs: vec![], next_ov: 1, last_shift_ms: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
         }
     }
 
     /// A 的缓存作废（新会话 / `Resync` / `Welcome{Reset}`）：之后整屏都是“缺”的，Scroll 区域重新按提案建。
     pub fn reset_a(&mut self) {
-        self.a_valid.fill(false); self.layer.fill(0); self.shadow.fill(0); self.scroll = None; self.stale.fill(true);
+        self.a_valid.fill(false); self.layer.fill(0); self.shadow.fill(0); self.scroll = None; self.stale.fill(true); self.ovs.clear();
     }
 
     /// A11y 给的图片矩形提案（屏幕像素）。只是提案：要过像素确认才会走 JPEG。
@@ -225,6 +233,55 @@ impl Encoder {
         }
     }
 
+    /// Overlay 管理（20 §5）：`cand` 是这个区域里“A 原本有内容、现在变了”的行（键、屏幕行、当前 hash）。
+    /// - 已有 Overlay 的行没变 → 稳定超过 `commit_ms` 就 `Commit`（A 把补丁写进画布，B 更新这些行的基准）；一直在变（光标闪烁 / 转圈）就永不 Commit
+    /// - 行变回了画布里的样子 / 又变了 → `OverlayDrop`，还在变的行重新发
+    /// - 没被盖住的候选行 → 新 `Overlay`（不动画布、不动行 hash 表）
+    /// 返回这次 Commit 的行 (键, 屏幕行, hash)，调用方更新基准。
+    fn overlay_pass(&mut self, region: u16, cand: &[(i64, usize, u64)], head_y0: Option<(i64, usize)>, p: &Params, now_ms: u64, level: i32, strip: usize, ops: &mut Vec<Op>) -> Vec<(i64, usize, u64)> {
+        let cmap: HashMap<i64, (usize, u64)> = cand.iter().map(|&(k, sy, h)| (k, (sy, h))).collect();
+        let commit_ms = p.get("commit_ms") as u64;
+        let mut committed = vec![]; let mut covered: HashSet<i64> = HashSet::new(); let mut keep = vec![];
+        for ov in std::mem::take(&mut self.ovs) {
+            if ov.region != region { keep.push(ov); continue }
+            let n = ov.hashes.len();
+            let same = (0..n).all(|i| cmap.get(&(ov.k0 + i as i64)).map_or(false, |&(_, h)| h == ov.hashes[i]));
+            if !same { ops.push(Op::OverlayDrop { id: ov.id }); continue }
+            if now_ms.saturating_sub(ov.since) >= commit_ms {
+                ops.push(Op::Commit { id: ov.id });
+                for i in 0..n { let k = ov.k0 + i as i64; let (sy, h) = cmap[&k]; committed.push((k, sy, h)); covered.insert(k); }   // 刚提交的行本帧不再重发
+                continue
+            }
+            for i in 0..n { covered.insert(ov.k0 + i as i64); }
+            keep.push(ov);
+        }
+        self.ovs = keep;
+        // 没被盖住的候选行 → 连续成带 → 新 Overlay
+        let mut rows: Vec<(i64, usize, u64)> = cand.iter().filter(|c| !covered.contains(&c.0)).cloned().collect(); rows.sort();
+        let (w, rb) = (self.w, self.w * 4); let xmax = if region == 1 { w - self.scroll.as_ref().map_or(0, |s| s.sb as usize) } else { w };
+        let mut i = 0;
+        while i < rows.len() {
+            let j0 = i; i += 1; while i < rows.len() && rows[i].0 == rows[i - 1].0 + 1 && rows[i].1 == rows[i - 1].1 + 1 { i += 1 }
+            let band = &rows[j0..i]; let (sy0, sy1) = (band[0].1, band[band.len() - 1].1 + 1);
+            let (mut x0, mut x1) = (xmax, 0usize);
+            if region == 0 {   // 相对画布里的版本（影子）收窄列
+                for &(_, sy, _) in band { let (c, sh) = (&self.cur[sy * rb..sy * rb + xmax * 4], &self.shadow[sy * rb..sy * rb + xmax * 4]); if c == sh { continue }
+                    let f = c.iter().zip(sh).position(|(a, b)| a != b).unwrap() / 4; let l = c.len() - 1 - c.iter().rev().zip(sh.iter().rev()).position(|(a, b)| a != b).unwrap();
+                    x0 = x0.min(f); x1 = x1.max(l / 4 + 1) }
+            } else { x0 = 0; x1 = xmax }
+            if x0 >= x1 { continue }
+            let mut inner: Vec<Op> = vec![]; let mut dummy = vec![false; self.h];
+            self.lit_band(sy0, sy1, x0, x1, &[], level, strip, false, &mut dummy, &mut inner);
+            let k0 = band[0].0;
+            let (inner, dy_off): (Vec<Op>, i64) = match head_y0 { Some((head, y0)) if region == 1 => { let f = move |sy: u32| -> u32 { (head + (sy as i64 - y0 as i64)) as u32 }; (inner.into_iter().map(|o| remap(o, 1, &f)).collect(), 0) } _ => (inner, 0) };
+            let _ = dy_off;
+            let id = self.next_ov; self.next_ov += 1;
+            ops.push(Op::Overlay { id, dst: Dst { region, x: x0 as u32, y: k0 as u32, w: (x1 - x0) as u32, h: band.len() as u32 }, ops: inner });
+            self.ovs.push(Ov { id, region, k0, hashes: band.iter().map(|b| b.2).collect(), since: now_ms });
+        }
+        committed
+    }
+
     fn regions_msg(&self) -> Vec<Region> {
         let mut v = vec![Region { id: 0, kind: RegionKind::Fixed { anchor: 0, z: 0 }, rect: Rect { x: 0, y: 0, w: self.w as u32, h: self.h as u32 }, start_y: 0 }];
         if let Some(s) = &self.scroll { v.push(Region { id: 1, kind: RegionKind::Scroll, rect: s.rect, start_y: s.head as i32 }) }
@@ -238,7 +295,7 @@ impl Encoder {
         if self.scroll.is_some() && now_ms > self.allow_change_until { return None }   // 页面生命周期内区域固定
         self.allow_change_until = 0;
         let old = self.scroll.take();
-        self.stale.fill(true);
+        self.stale.fill(true); self.ovs.retain(|o| o.region != 1);
         let Some(rect) = want else {
             if let Some(o) = old { for y in o.rect.y..o.rect.y + o.rect.h { self.a_valid[y as usize] = false } }   // 撤销后这些行按 Fixed 重发
             return Some(self.regions_msg());
@@ -300,7 +357,22 @@ impl Encoder {
         let scroll_rows = match &self.scroll { Some(s) => s.rect.y as usize..(s.rect.y + s.rect.h) as usize, None => 0..0 };
 
         // ───────── Fixed 区域（不含 Scroll 的行）─────────
-        let missing: Vec<bool> = (0..h).map(|y| !scroll_rows.contains(&y) && (!self.a_valid[y] || self.a_hash[y] != self.cur_hash[y])).collect();
+        // 原地变化（A 原本有内容）先包成 Overlay；大面积变化（换页）和新内容直接写画布（40 §4、20 §5）
+        let fixed_rows = h - scroll_rows.len();
+        let inplace: Vec<usize> = (0..h).filter(|&y| !scroll_rows.contains(&y) && self.a_valid[y] && self.a_hash[y] != self.cur_hash[y]).collect();
+        let page_chg = inplace.len() >= 8 && inplace.len() as f64 > p.get("page_change_ratio") * fixed_rows as f64;
+        // 图片行不走 Overlay（补丁里没有 JPEG，照片会被无损发一遍）；变化面积大的（内容刷新，不是涟漪 / 光标 / 开关）也直接写画布
+        let in_img = |y: usize| self.hints.iter().any(|r| y >= r.y as usize && y < (r.y + r.h) as usize);
+        let inplace: Vec<usize> = inplace.into_iter().filter(|&y| !in_img(y)).collect::<Vec<_>>();
+        let n_img_rows = (0..h).filter(|&y| !scroll_rows.contains(&y) && self.a_valid[y] && self.a_hash[y] != self.cur_hash[y] && in_img(y)).count();
+        let big = inplace.len() as f64 > p.get("overlay_max_frac") * fixed_rows as f64;
+        if page_chg { for o in std::mem::take(&mut self.ovs) { if o.region == 0 { ops.push(Op::OverlayDrop { id: o.id }) } else { self.ovs.push(o) } } }
+        let _ = n_img_rows;
+        let use_ov = !page_chg && !big && p.get("overlay") > 0.5;
+        let cand_f: Vec<(i64, usize, u64)> = if use_ov { inplace.iter().map(|&y| (y as i64, y, self.cur_hash[y])).collect() } else { vec![] };
+        // 进 Overlay 的行不算“缺”；其余变了的行（含图片行）按画布写
+        let ov_rows: HashSet<usize> = cand_f.iter().map(|c| c.1).collect();
+        let missing: Vec<bool> = (0..h).map(|y| !scroll_rows.contains(&y) && (!self.a_valid[y] || (self.a_hash[y] != self.cur_hash[y] && !ov_rows.contains(&y)))).collect();
         let mut bands: Vec<(usize, usize, usize, usize)> = vec![];   // y0, y1, x0, x1
         let mut y = 0;
         while y < h {
@@ -334,7 +406,7 @@ impl Encoder {
             }
         }
         let fixed_empty = bands.is_empty() && images.is_empty();
-        if fixed_empty && ops.is_empty() && scroll_img_ops.is_empty() && regions.is_none() { return Out { ops: vec![], rows: 0, defer: deferred.iter().any(|&d| d), regions: None } }
+        if fixed_empty && ops.is_empty() && scroll_img_ops.is_empty() && regions.is_none() && cand_f.is_empty() && self.ovs.is_empty() { return Out { ops: vec![], rows: 0, defer: deferred.iter().any(|&d| d), regions: None, ov_pending: false } }
         for &(y0, y1, x0, x1) in &bands { self.lit_band(y0, y1, x0, x1, &images, level, strip, defer_on, &mut deferred, &mut ops) }
         for r in &images { ops.push(Op::Image { dst: Dst { region: 0, x: r.x, y: r.y, w: r.w, h: r.h }, sprite: None, q: p.get("img_q") as u8, mask: vec![], data: self.jpeg(r, p.get("img_q") as u8) }) }
         ops.extend(scroll_img_ops);
@@ -348,10 +420,18 @@ impl Encoder {
         for op in &ops { if op.dst().map_or(false, |d| d.region == 0) && !matches!(op, Op::Copy { .. }) { let d = op.dst().unwrap(); let l = if matches!(op, Op::Image { .. }) { LAYER_LIT } else { LAYER_BG };
             for r in 0..d.h as usize { let o = (d.y as usize + r) * w + d.x as usize; self.layer[o..o + d.w as usize].fill(l) } } }
 
+        // Overlay（Fixed）：新补丁 / 丢弃 / 稳定后 Commit（更新画布基准）
+        let mut committed_f: Vec<(i64, usize, u64)> = vec![];
+        if use_ov || self.ovs.iter().any(|o| o.region == 0) {
+            let cf = self.overlay_pass(0, &cand_f, None, p, now_ms, level, strip, &mut ops);
+            for &(_, sy, hsh) in &cf { self.shadow[sy * rb..(sy + 1) * rb].copy_from_slice(&self.cur[sy * rb..(sy + 1) * rb]); self.a_hash[sy] = hsh; self.a_valid[sy] = true; }
+            committed_f = cf;
+        }
         // 校验（Fixed）：只覆盖本帧写过、且不含有损像素的连续行
         if p.get("verify") > 0.5 {
             let full = Mask::full(w as u32); let mut touched = vec![false; h];
             for &(y0, y1, _, _) in &bands { for yy in y0..y1 { touched[yy] = !deferred[yy] } }
+            for &(_, sy, _) in &committed_f { touched[sy] = true }
             let clean = |yy: usize| touched[yy] && self.layer[yy * w..(yy + 1) * w].iter().all(|&l| l != LAYER_LIT);
             let mut yy = 0;
             while yy < h {
@@ -363,7 +443,7 @@ impl Encoder {
         }
         let defer = deferred.iter().any(|&d| d);
         if !defer { self.defer_since = None }
-        Out { ops, rows, defer, regions }
+        Out { ops, rows, defer, regions, ov_pending: !self.ovs.is_empty() }
     }
 
     /// Scroll 区域一帧：求位移 → 采集头 → 缺的行（内容坐标）→ 编码。返回写了多少行。
@@ -382,7 +462,7 @@ impl Encoder {
             if same == rh {
                 // 一点没变。预期了滚动却没动 → 到边的迹象由调用方的超时处理（expect_timeout）
             } else if let Some(sh) = { let ev: Vec<bool> = (0..rh).map(|i| info[i] && ch[i] != s.prev_h[i]).collect(); detect_shift(&s.prev_h, &ch, &ev, expect, &cfg) } {   // 只拿“和上一帧同位置不同”的行当证据：吸顶的行不动，不该拖低匹配比例
-                dy = sh.dy; s.head += dy as i64; self.last_dy = dy; self.n_shift += 1;
+                dy = sh.dy; s.head += dy as i64; self.last_dy = dy; self.n_shift += 1; self.last_shift_ms = now_ms;
                 if let Some(e) = expect { if (dy.abs() as f64) < 0.5 * e.abs() as f64 { if e > 0 { s.at_bottom = true } else { s.at_top = true } } else { s.at_top = false; s.at_bottom = false } }
                 self.expect = None;
             } else if (rh - same) as f64 > page_change * rh as f64 { reset = true }
@@ -411,22 +491,30 @@ impl Encoder {
             }
         }
         if s.head < 1024 || s.head > 2 * ORIGIN as i64 { reset = true }
-        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
+        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); self.ovs.retain(|o| o.region != 1); let s = self.scroll.as_mut().unwrap(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
         let s = self.scroll.as_mut().unwrap();
         // 缺的行（内容坐标）
         let mut missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();
-        // 列表异步出图 / 条目重新绑定会先闪一个占位态再变回已缓存的样子：已知内容行上的原地变化先压住，稳定了再发
-        let hold = p.get("hold_known_ms") as u64;
-        if hold > 0 {
-            for i in 0..rh {
-                let cy = s.head + i as i64;
-                if missing[i] && s.known.contains_key(&cy) {
+        // 已知内容行上的原地变化：别直接写画布，先包成 Overlay（20 §5）。刚滚动过的那一阵，列表异步出图 / 条目重新绑定会先闪一个占位态再变回已缓存的样子，
+        // 这类变化先压住 `hold_known_ms`：中途变回已缓存的版本就一个字节都不用发
+        let hold = p.get("hold_known_ms") as u64; let use_ov = p.get("overlay") > 0.5;
+        let recently_shifted = now_ms.saturating_sub(self.last_shift_ms) < 800;
+        let mut cand_s: Vec<(i64, usize, u64)> = vec![];
+        for i in 0..rh {
+            let cy = s.head + i as i64;
+            let known_same = s.known.get(&cy) == Some(&ch[i]);
+            if missing[i] && s.known.contains_key(&cy) {
+                if hold > 0 && recently_shifted {
                     let e = s.pending.entry(cy).or_insert((ch[i], now_ms));
                     if e.0 != ch[i] { *e = (ch[i], now_ms) }
-                    if now_ms.saturating_sub(e.1) < hold { missing[i] = false; deferred[y0 + i] = true }
-                } else if !missing[i] { s.pending.remove(&cy); }
-            }
+                    if now_ms.saturating_sub(e.1) < hold { missing[i] = false; deferred[y0 + i] = true; continue }
+                }
+                let sy = y0 + i;
+                let in_img = self.hints.iter().any(|r| sy >= r.y as usize && sy < (r.y + r.h) as usize);
+                if use_ov && !in_img { missing[i] = false; cand_s.push((cy, sy, ch[i])) }   // 图片行 / overlay 关：按画布写
+            } else if known_same { s.pending.remove(&cy); }
         }
+        if cand_s.len() as f64 > p.get("overlay_max_frac") * rh as f64 { for c in cand_s.drain(..) { missing[c.1 - y0] = true } }   // 变化面积大：内容刷新，按画布写
         let mut written = 0u32;
         let mut bands: Vec<(usize, usize, usize, usize)> = vec![];   // 屏幕行 i0..i1（相对 rect），列 x0..x1
         let xmax = w - sb;
@@ -483,6 +571,11 @@ impl Encoder {
             written += 1;
         } }
         for r in &images { for sy in r.y..r.y + r.h { s.lit.insert(s.head + (sy as i64 - y0 as i64)); } }
+        // Overlay（Scroll）
+        let head_now = s.head;
+        let committed_s = if use_ov || self.ovs.iter().any(|o| o.region == 1) { self.overlay_pass(1, &cand_s, Some((head_now, y0)), p, now_ms, level, strip, ops) } else { vec![] };
+        let s = self.scroll.as_mut().unwrap();
+        for &(k, _, hsh) in &committed_s { s.known.insert(k, hsh); s.pending.remove(&k); }
         // Head / Known
         if s.head != s.last_head { ops.push(Op::Head { region: 1, y: s.head as i32 }); s.last_head = s.head }
         let (kmin, kmax) = (s.known.keys().min().copied().unwrap_or(0) as i32, s.known.keys().max().map_or(0, |&m| m as i32 + 1));
@@ -492,6 +585,7 @@ impl Encoder {
         if p.get("verify") > 0.5 {
             let mut touched = vec![false; rh];
             for &(i0, i1, _, _) in &bands { for ii in i0..i1 { touched[ii] = !deferred[y0 + ii] } }
+            for &(k, _, _) in &committed_s { let ii = (k - s.head) as usize; if ii < rh { touched[ii] = true } }
             let clean = |ii: usize| touched[ii] && !s.lit.contains(&(s.head + ii as i64));
             let mut ii = 0;
             while ii < rh {
@@ -546,6 +640,8 @@ mod tests {
         assert!(ap.verify_fail.is_empty(), "校验失败 {:?}", ap.verify_fail);
         out
     }
+    /// A 实际显示的（画布 + Overlay 合成）
+    fn shown(c: &mut Canvas) -> Vec<u8> { c.compose(0); c.view.clone() }
     fn size(o: &Out) -> usize { o.ops.iter().map(|op| to_postcard(op).len()).sum() }
 
     #[test] fn first_frame_is_lossless_and_second_identical_frame_is_empty() {
@@ -564,7 +660,7 @@ mod tests {
         let first = run(&mut e, &mut c, &p, &f);
         for y in 50..58 { for x in 30..40 { let o = (y * W + x) * 4; f[o..o + 3].copy_from_slice(&[200, 0, 0]) } }
         let o = run(&mut e, &mut c, &p, &f);
-        assert!(rows_equal(&c.px, &f, &[]));
+        assert!(rows_equal(&shown(&mut c), &f, &[]));
         assert!(size(&o) * 10 < size(&first), "{} vs {}", size(&o), size(&first));
         for op in &o.ops { let d = op.dst().unwrap(); assert!(d.x >= 30 && d.x + d.w <= 40, "列界应收窄 {:?}", d) }
     }
@@ -576,7 +672,7 @@ mod tests {
         e.push_frame(&text_frame(1), W * 4); e.push_frame(&text_frame(2), W * 4);   // 两帧只编最后一次
         let f3 = text_frame(3); let out = { e.push_frame(&f3, W * 4); e.encode(&p, 0) };
         c.apply(&out.ops).unwrap();
-        assert!(rows_equal(&c.px, &f3, &[]));
+        assert!(rows_equal(&shown(&mut c), &f3, &[]));
     }
     #[test] fn photo_hint_goes_jpeg_and_rest_stays_lossless() {
         let mut p = Params::new(); p.set("verify", 1.0);
@@ -788,5 +884,65 @@ mod tests {
         srun(&mut e, &mut c, &p, &f1, 100);
         let o4 = srun(&mut e, &mut c, &p, &f1, 300); assert!(sbytes(&o4) > 0, "稳定后发出");
         assert!(compose_equals(&mut c, &f1, 20));
+    }
+
+    // ───────── Overlay ─────────
+    fn ov_count(o: &Out) -> (usize, usize, usize) { (o.ops.iter().filter(|x| matches!(x, Op::Overlay { .. })).count(), o.ops.iter().filter(|x| matches!(x, Op::OverlayDrop { .. })).count(), o.ops.iter().filter(|x| matches!(x, Op::Commit { .. })).count()) }
+    fn press(f: &[u8]) -> Vec<u8> { let mut g = f.to_vec(); for y in 120..132 { for x in 20..80 { let o = (y * W + x) * 4; g[o..o + 3].copy_from_slice(&[255, 200, 0]) } } g }
+
+    #[test] fn ripple_goes_to_overlay_not_canvas_and_revert_costs_nothing() {
+        let mut p = Params::new(); p.set("verify", 1.0); p.set("hold_known_ms", 0.0);
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let f0 = text_frame(0); run(&mut e, &mut c, &p, &f0);
+        let canvas_before = c.px.clone();
+        let f1 = press(&f0);
+        let o1 = run(&mut e, &mut c, &p, &f1);   // 按下涟漪
+        assert_eq!(ov_count(&o1), (1, 0, 0)); assert_eq!(c.px, canvas_before, "画布不动");
+        assert!(rows_equal(&shown(&mut c), &f1, &[]), "但画面上看得见");
+        let o2 = run(&mut e, &mut c, &p, &f0);   // 涟漪消失，变回画布里的样子
+        assert_eq!(ov_count(&o2), (0, 1, 0)); assert!(o2.ops.iter().all(|x| matches!(x, Op::OverlayDrop { .. })), "只有 OverlayDrop，不带像素");
+        assert!(rows_equal(&shown(&mut c), &f0, &[])); assert_eq!(c.px, canvas_before);
+        let o3 = run(&mut e, &mut c, &p, &f0); assert!(o3.ops.is_empty() || ov_count(&o3) == (0, 0, 0));
+    }
+    #[test] fn stable_change_commits_into_canvas_and_becomes_the_new_base() {
+        let mut p = Params::new(); p.set("verify", 1.0); p.set("hold_known_ms", 0.0); p.set("commit_ms", 500.0);
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let f0 = text_frame(0); run(&mut e, &mut c, &p, &f0);
+        let f1 = press(&f0);
+        e.push_frame(&f1, W * 4); let o1 = e.encode(&p, 100); c.apply(&o1.ops).unwrap(); assert_eq!(ov_count(&o1).0, 1);
+        e.push_frame(&f1, W * 4); let o2 = e.encode(&p, 400); c.apply(&o2.ops).unwrap(); assert_eq!(ov_count(&o2), (0, 0, 0), "还没稳定够");
+        e.push_frame(&f1, W * 4); let o3 = e.encode(&p, 700); let ap = c.apply(&o3.ops).unwrap(); assert_eq!(ov_count(&o3).2, 1, "稳定超过 commit_ms：Commit");
+        assert!(ap.verify_fail.is_empty());
+        assert!(rows_equal(&c.px, &f1, &[]), "画布并入了新内容");
+        e.push_frame(&f1, W * 4); let o4 = e.encode(&p, 800); assert!(o4.ops.is_empty(), "之后静止零流量：{:?}", o4.ops.iter().map(|x| x.kind()).collect::<Vec<_>>());
+        // 变回去又是一次原地变化
+        let o5 = { e.push_frame(&f0, W * 4); e.encode(&p, 900) }; c.apply(&o5.ops).unwrap(); assert_eq!(ov_count(&o5).0, 1);
+    }
+    #[test] fn blinking_cursor_never_commits_and_never_pollutes_canvas() {
+        let mut p = Params::new(); p.set("hold_known_ms", 0.0); p.set("commit_ms", 1000.0);
+        let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        let f0 = text_frame(0); run(&mut e, &mut c, &p, &f0); let base = c.px.clone();
+        let on = press(&f0); let mut commits = 0; let mut t = 0u64;
+        for i in 0..8 { t += 500; let f = if i % 2 == 0 { &on } else { &f0 };
+            e.push_frame(f, W * 4); let o = e.encode(&p, t); commits += ov_count(&o).2; c.apply(&o.ops).unwrap(); }
+        assert_eq!(commits, 0, "闪烁永不 Commit"); assert_eq!(c.px, base, "画布始终是干净的");
+        assert!(rows_equal(&shown(&mut c), &f0, &[]));
+    }
+    #[test] fn page_change_writes_canvas_directly() {
+        let p = Params::new(); let (mut e, mut c) = (Encoder::new(W, H), Canvas::new(W, H));
+        run(&mut e, &mut c, &p, &text_frame(0));
+        let mut inv = text_frame(0); for px in inv.chunks_exact_mut(4) { px[0] = !px[0]; px[1] = !px[1] }
+        let o = run(&mut e, &mut c, &p, &inv);   // 大面积变化：换页，不走 Overlay
+        assert_eq!(ov_count(&o).0, 0); assert!(rows_equal(&c.px, &inv, &[]));
+    }
+    #[test] fn scroll_overlay_follows_content_and_commits() {
+        let mut p = sp(); p.set("hold_known_ms", 0.0); p.set("commit_ms", 300.0);
+        let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
+        e.set_scroll_proposal(Some(srect())); let f0 = scroll_frame(0); srun(&mut e, &mut c, &p, &f0, 0);
+        let mut f1 = f0.clone(); for y in 60..80 { for x in 10..60 { let o = (y * SW + x) * 4; f1[o..o + 3].copy_from_slice(&[255, 180, 0]) } }
+        let o1 = srun(&mut e, &mut c, &p, &f1, 10); assert_eq!(ov_count(&o1).0, 1); assert!(compose_equals(&mut c, &f1, 20));
+        let o2 = srun(&mut e, &mut c, &p, &f1, 200); assert_eq!(ov_count(&o2), (0, 0, 0));
+        let o3 = srun(&mut e, &mut c, &p, &f1, 400); assert_eq!(ov_count(&o3).2, 1); assert!(compose_equals(&mut c, &f1, 20));
+        let o4 = srun(&mut e, &mut c, &p, &f0, 500); assert_eq!(ov_count(&o4).0, 1, "提交后变回去又是原地变化");
     }
 }
