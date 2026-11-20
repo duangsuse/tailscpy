@@ -8,9 +8,14 @@ import java.io.File
 
 fun main(args: Array<String>) {
     var port = 7701; var record: File? = null; var so: String? = null
+    var netPort = 4433; var lan = false; var allow = ""; var viewer = "http://localhost:8080/"; var keepS = 60L; var noNet = false
     var i = 0
     while (i < args.size) {
-        when (args[i]) { "--port" -> port = args[++i].toInt(); "--record" -> record = File(args[++i]); "--so" -> so = args[++i] }
+        when (args[i]) {
+            "--port" -> port = args[++i].toInt(); "--record" -> record = File(args[++i]); "--so" -> so = args[++i]
+            "--net-port" -> netPort = args[++i].toInt(); "--lan" -> lan = true; "--allow" -> allow = args[++i]; "--viewer" -> viewer = args[++i]
+            "--detach-keep" -> keepS = args[++i].toLong(); "--no-net" -> noNet = true
+        }
         i++
     }
     so?.let { try { Native.load(it) } catch (e: Throwable) { log("加载 $it 失败: $e") } }
@@ -25,7 +30,15 @@ fun main(args: Array<String>) {
     val a11y = A11y()
     val dbg = Debug(port, pf, a11y, settings, record)
     Runtime.getRuntime().addShutdownHook(Thread { try { dbg.closeSession() } catch (_: Throwable) {} })
-    dbg.serve()   // 3
+    // 3：网络（有 .so 才起）。启动顺序里“起网络、打印 URL”在“等 Open”之前（60 §1）
+    var loaded = false
+    so?.let { try { Native.version(); loaded = true } catch (e: Throwable) { log("libhj_host 不可用: $e") } }
+    if (loaded && !noNet) {
+        val sess = Session(dbg, pf, a11y, settings); dbg.session = sess
+        allow.split(',').filter { it.isNotBlank() }.forEach { sess.allow.add(it.trim()) }
+        sess.start(File("/data/local/tmp/hj"), netPort, lan, emptyList(), viewer, keepS)
+    }
+    dbg.serve()
     dbg.closeSession()
     Runtime.getRuntime().halt(0)
 }

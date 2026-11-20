@@ -3,6 +3,7 @@ package hj
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -24,7 +25,8 @@ val WHITELIST = listOf(
  */
 class Debug(private val port: Int, private val pf: Platform, private val a11y: A11y, private val settings: Settings,
             private val autoRecord: File?) {
-    private var pkg: String? = null
+    var pkg: String? = null; private set
+    var session: Session? = null
     private var rec: Recorder? = null
     private val dev = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
     @Volatile private var quit = false
@@ -95,25 +97,7 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
                 val inst = sh("pm list packages").lineSequence().map { it.removePrefix("package:").trim() }.toSet()
                 return ok().put("apps", JSONArray(WHITELIST.filter { it in inst }))
             }
-            "open" -> {
-                val p = r.getString("pkg")
-                if (p !in WHITELIST) return err("不在白名单: $p")
-                if (pf.displayId >= 0) closeSession()
-                val phys = sh("wm size").substringAfterLast(' ').split('x')
-                val dens = sh("wm density").substringAfterLast(' ').toIntOrNull() ?: 420
-                val w = r.optInt("w", phys[0].toInt()); val h = r.optInt("h", phys[1].toInt()); val dpi = r.optInt("dpi", dens)
-                settings.apply(r.optString("animator", "0"))
-                pf.openDisplay(w, h, dpi)?.let { settings.restore(); return err(it) }
-                try { a11y.connect() } catch (e: Throwable) { log("UiAutomation 连接失败（继续，无 A11y）: ${e.cause ?: e}") }
-                pf.forceStop(p)   // 冷启动：每次 open 都从进程不存在开始，录制与回放起点一致
-                pf.startApp(p)?.let { closeSession(); return err(it) }
-                pkg = p
-                if (autoRecord != null && rec == null) startRecord(File(autoRecord, p))
-                // 等首帧
-                val t0 = System.currentTimeMillis()
-                synchronized(pf.lock) { while (pf.seq == 0L && System.currentTimeMillis() - t0 < 5000) pf.lock.wait(100) }
-                return ok().put("display", pf.displayId).put("w", w).put("h", h).put("dpi", dpi).put("a11y", a11y.connected).put("seq", pf.seq)
-            }
+            "open" -> return openSession(r)
             "close" -> { closeSession(); return ok() }
             "quit" -> { closeSession(); quit = true; return ok() }
             "frame" -> {
@@ -172,12 +156,40 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
                 ts.sort(); val mp = pf.w * pf.h / 1e6
                 return ok().put("medianMs", ts[ts.size / 2]).put("msPerMP", ts[ts.size / 2] / mp).put("bytes", sz).put("q", q)
             }
+            // ── 扮演 A：wire 类型的 JSON 形式，和网络上来的 Up 走同一条处理路径（60 §10）──
+            "wire" -> { val s = session ?: return err("网络未启动（host 要带 --so）"); s.handle(JSONTokener(r.get("msg").let { if (it is String) JSONObject.quote(it) else it.toString() }).nextValue()); return ok() }
+            "wire_log" -> return ok().put("down", (session ?: return err("网络未启动")).recentDown(r.optInt("n", 20)))
+            "wire_rt" -> return ok().put("rt", JSONObject(Native.roundtrip(r.getString("kind"), r.get("json").let { if (it is String) JSONObject.quote(it) else it.toString() })))
+            "net" -> return ok().put("net", session?.info ?: JSONObject()).put("allow", JSONArray((session?.allow ?: emptySet<String>()).toList())).put("active", session?.active ?: false)
+            "net_stats" -> return ok().put("stats", JSONObject(Native.stats()))
+            "param" -> return ok().put("accepted", Native.param(r.getString("key"), r.getDouble("val")))
+            "policy" -> { val s = session ?: return err("网络未启动"); s.allow.clear(); r.optJSONArray("allow")?.let { a -> for (i in 0 until a.length()) s.allow.add(a.getString(i)) }; return ok().put("allow", JSONArray(s.allow.toList())) }
             "mark" -> { rec?.mark(r.getString("name")); return ok() }
             "step" -> { rec?.step(r.getJSONObject("data")); return ok() }
             "rec_start" -> { startRecord(File(r.getString("dir"))); return ok() }
             "rec_stop" -> { rec?.close(); rec = null; return ok() }
             else -> return err("未知命令 $cmd")
         }
+    }
+
+    /** 打开会话：改设置 → 建虚拟屏 → 连 A11y → 冷启动 App（60 §1）。调试口 `open` 和网络 `Up::Open` 共用。 */
+    fun openSession(r: JSONObject): JSONObject {        val p = r.getString("pkg")
+        if (p !in WHITELIST) return err("不在白名单: $p")
+        if (pf.displayId >= 0) closeSession()
+        val phys = sh("wm size").substringAfterLast(' ').split('x')
+        val dens = sh("wm density").substringAfterLast(' ').toIntOrNull() ?: 420
+        val w = r.optInt("w", phys[0].toInt()); val h = r.optInt("h", phys[1].toInt()); val dpi = r.optInt("dpi", dens)
+        settings.apply(r.optString("animator", "0"))
+        pf.openDisplay(w, h, dpi)?.let { settings.restore(); return err(it) }
+        try { a11y.connect() } catch (e: Throwable) { log("UiAutomation 连接失败（继续，无 A11y）: ${e.cause ?: e}") }
+        pf.forceStop(p)   // 冷启动：每次 open 都从进程不存在开始，录制与回放起点一致
+        pf.startApp(p)?.let { closeSession(); return err(it) }
+        pkg = p
+        if (autoRecord != null && rec == null) startRecord(File(autoRecord, p))
+        // 等首帧
+        val t0 = System.currentTimeMillis()
+        synchronized(pf.lock) { while (pf.seq == 0L && System.currentTimeMillis() - t0 < 5000) pf.lock.wait(100) }
+        return ok().put("display", pf.displayId).put("w", w).put("h", h).put("dpi", dpi).put("a11y", a11y.connected).put("seq", pf.seq)
     }
 
     private fun startRecord(dir: File) {
@@ -192,6 +204,7 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
     }
 
     fun closeSession() {
+        session?.onClosed()
         rec?.close(); rec = null
         pkg?.let { pf.forceStop(it) }
         pf.close(); a11y.disconnect(); settings.restore(); pkg = null

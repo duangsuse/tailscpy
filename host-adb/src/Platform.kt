@@ -69,6 +69,7 @@ class Platform {
     fun curLocked(): ByteArray = cur
     fun hashLocked(): LongArray = curHash
 
+    fun context(): Context = ctx
     private val imInst: Any
     private val inject: java.lang.reflect.Method
     private val setDisp = InputEvent::class.java.getMethod("setDisplayId", Int::class.javaPrimitiveType)
@@ -301,12 +302,12 @@ class Platform {
         path((0..n).map { i -> val f = i.toFloat() / n; Triple(durMs * i / n, x1 + (x2 - x1) * f, y1 + (y2 - y1) * f) })
     }
 
-    @Synchronized fun key(code: Int, down: Boolean = true, up: Boolean = true) {
+    @Synchronized fun key(code: Int, down: Boolean = true, up: Boolean = true, meta: Int = 0) {
         if (displayId < 0) return
         injectLog?.invoke("key", "code=$code")
         val now = SystemClock.uptimeMillis()
-        if (down) send(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, -1, 0, 0, InputDevice.SOURCE_KEYBOARD))
-        if (up) send(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, 0, -1, 0, 0, InputDevice.SOURCE_KEYBOARD))
+        if (down) send(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, meta, -1, 0, 0, InputDevice.SOURCE_KEYBOARD))
+        if (up) send(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, meta, -1, 0, 0, InputDevice.SOURCE_KEYBOARD))
     }
 
     fun back() = key(KeyEvent.KEYCODE_BACK)

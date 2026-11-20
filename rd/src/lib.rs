@@ -1,12 +1,23 @@
 //! rd：两端（B 的 .so、A 的 WASM）与 bench 共用的核心。
 //!
-//! 规则（doc/90-tasks.md §0 第 4 条）：**rd 里不读墙钟、不做 I/O**。时间从帧和输入的时间戳来，这是 bench 能重放的前提。
+//! 规则（doc/90-tasks.md §0 第 4 条）：**rd 里不读墙钟，不做 I/O**。时间从帧和输入的时间戳来，这是 bench 能重放的前提。
 //! 区域 / 语义侦测放 `region.rs`，启发式 / 规则集合放 `heuristics.rs`（M2 起），各自独立成单文件。
+
+pub mod dec;
+pub mod hash;
+pub mod lit;
+pub mod params;
+pub mod region;
+pub mod wire;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod enc;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
 
 /// 空壳版本号：构建链路（.so / wasm）冒烟用。
 pub fn version() -> &'static str { concat!("rd ", env!("CARGO_PKG_VERSION")) }
 
-/// 每行 hash（M0 只给 bench 的朴素基线和 host 的变化检测对账用；列掩码参数 M1 起加）。
+/// 每行 hash（M0 只给 bench 的朴素基线和 host 的变化检测对账用；带列掩码的版本见 `hash::row_hash_masked`）。
 /// FNV-1a 风格，对 RGBA 行字节。
 pub fn row_hash(row: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;

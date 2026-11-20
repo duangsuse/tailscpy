@@ -2,12 +2,16 @@
 name = "hj_host"
 version = "0.0.0"
 edition = "2021"
-description = "B 端 .so：rd + WebTransport 服务端（M1 起）。M0 只有 JNI 空壳，用来验证构建与推送链路"
+description = "B 端 .so：rd + WebTransport 服务端（任务 11）+ 编码线程；Kotlin 经 JNI 调用"
 
 [lib]
 name = "hj_host"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rd = { path = "../rd" }
 jni = "0.21"
+wtransport = { version = "0.7", features = ["quinn"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+serde_json = "1"
+time = "0.3"

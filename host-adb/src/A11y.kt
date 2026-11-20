@@ -115,6 +115,30 @@ class A11y {
         return o
     }
 
+    /** 虚拟屏上是否有“可编辑的输入焦点”（→ Focus{editable}，A 据此决定可打印键是文本还是调试键）。 */
+    fun editableFocus(display: Int): Boolean {
+        for (w in windowsOn(display)) {
+            val f = w.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: continue
+            if (f.isEditable) return true
+        }
+        return false
+    }
+
+    /** A11y 的图片节点矩形提案 [[x,y,w,h]…]（rd 要再过像素确认才会走 JPEG）：ImageView 类、没有文本、可见、面积 ≥ minArea。 */
+    fun imageRects(display: Int, minArea: Int): JSONArray {
+        val out = JSONArray()
+        fun walk(n: AccessibilityNodeInfo, d: Int) {
+            val cls = n.className?.toString() ?: ""
+            if (cls.endsWith("ImageView") && n.text == null && n.isVisibleToUser) {
+                val r = Rect(); n.getBoundsInScreen(r)
+                if (r.width() * r.height() >= minArea) out.put(JSONArray().put(r.left).put(r.top).put(r.width()).put(r.height()))
+            }
+            if (d < 40) for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, d + 1) }
+        }
+        for (w in windowsOn(display)) w.root?.let { walk(it, 0) }
+        return out
+    }
+
     /** 节点树摘要（每行一个有意义的节点），调试口打印用。 */
     fun brief(tree: JSONObject): String {
         val sb = StringBuilder()

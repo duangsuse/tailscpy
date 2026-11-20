@@ -1,4 +1,30 @@
 <!doctype html>
-<meta charset="utf-8"><title>活镜查看端（骨架）</title>
-<body style="font:14px system-ui;background:#111;color:#ddd"><pre id="o">加载 rd.wasm …</pre>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>活镜查看端</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#ddd;font:13px system-ui,sans-serif;overflow:hidden}
+  #bar{position:fixed;top:0;left:0;right:0;height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#1b1b1b;z-index:5}
+  #bar .sp{flex:1}
+  #st{color:#9a9}
+  #st.bad{color:#f88}
+  select,button{background:#2a2a2a;color:#ddd;border:1px solid #444;border-radius:4px;padding:2px 6px;font:inherit}
+  #stage{position:absolute;top:32px;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
+  #wrap{position:relative;line-height:0;touch-action:none}
+  #cv,#ov{display:block;position:absolute;left:0;top:0;width:100%;height:100%}
+  #ov{pointer-events:none}
+  #ime{position:fixed;left:-100px;top:0;width:10px;height:10px;opacity:0}
+  #panel{position:fixed;top:36px;left:6px;width:300px;max-height:calc(100vh - 48px);overflow:auto;background:#000c;border:1px solid #333;border-radius:6px;padding:8px;z-index:6;display:none;font-size:12px}
+  #panel h4{margin:8px 0 4px;color:#9bd}
+  #panel .bar{height:8px;background:#333;border-radius:2px;overflow:hidden;margin:2px 0 4px}
+  #panel .bar i{display:block;height:100%}
+  #panel .row{display:flex;justify-content:space-between;gap:6px}
+  #panel input[type=range]{width:120px}
+  #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#333;padding:6px 12px;border-radius:6px;z-index:9;display:none}
+  #msg{position:absolute;inset:32px 0 0 0;display:flex;align-items:center;justify-content:center;text-align:center;color:#888;white-space:pre-line;pointer-events:none}
+</style>
+<div id="bar"><b>活镜</b><span id="st">未连接</span><span class="sp"></span><span id="foc"></span><select id="app"><option value="">选择 App…</option></select><button id="bl" tabindex="-1">l</button><button id="br" tabindex="-1">r</button></div>
+<div id="stage"><div id="wrap"><canvas id="cv"></canvas><canvas id="ov"></canvas></div></div>
+<div id="msg">加载中…</div>
+<textarea id="ime" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+<div id="panel"></div><div id="toast"></div>
 <script type="module" src="./main.js"></script>
