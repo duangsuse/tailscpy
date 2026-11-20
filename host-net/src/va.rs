@@ -30,7 +30,11 @@ pub fn attach(core: &Arc<Core>) {
             let mut ack = None;
             match d {
                 Down::Page { seq, regions, op: PageOp::Replace, .. } => {
-                    if let Some(r) = regions.first() { va.canvas = Some(Canvas::new(r.rect.w as usize, r.rect.h as usize)) }
+                    if let Some(r) = regions.first() { let mut cv = Canvas::new(r.rect.w as usize, r.rect.h as usize); cv.sb = c.params.lock().unwrap().get("sb_w") as usize; cv.set_regions(&regions); va.canvas = Some(cv) }
+                    va.applied_seq = seq; ack = Some(seq);
+                }
+                Down::Regions { seq, regions, .. } => {
+                    if let Some(cv) = va.canvas.as_mut() { cv.set_regions(&regions) }
                     va.applied_seq = seq; ack = Some(seq);
                 }
                 Down::Tx { seq, ops, .. } => {
@@ -58,32 +62,42 @@ pub fn detach(core: &Arc<Core>) {
 /// 状态 + 与 B 当前帧的差异（排除有损像素）+ 每行 hash（有损像素置 0 后算，场景里比较两次画面是否一致用）
 pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
     let idle = core.is_idle();
-    let g = core.va.lock().unwrap();
-    let Some(va) = g.as_ref() else { return serde_json::json!({"attached": false}) };
+    let mut g = core.va.lock().unwrap();
+    let Some(va) = g.as_mut() else { return serde_json::json!({"attached": false}) };
     let mut j = serde_json::json!({"attached": true, "idle": idle, "rx_bytes": va.rx_bytes, "txs": va.txs, "applied_seq": va.applied_seq,
         "tx_seq": core.tx_seq.load(Ordering::Relaxed), "verify_fail": va.verify_fail, "images": va.images, "err": va.err});
-    if let Some(cv) = &va.canvas {
+    let (rx_bytes_unused, _) = (0, 0); let _ = rx_bytes_unused;
+    if let Some(cv) = va.canvas.as_mut() {
+        // Scroll 画布：A 的视口跟随采集头，合成后再和 B 帧比
+        let head = cv.scroll.as_ref().map(|s| s.head);
+        let scroll_rect = cv.scroll.as_ref().map(|s| s.rect);
+        if let Some(hd) = head { cv.compose(hd); }
         let (w, h) = (cv.w, cv.h); let rb = w * 4;
+        let sbw = if scroll_rect.is_some() { cv.sb } else { 0 };
+        let (px, layer): (&[u8], &[u8]) = if head.is_some() { (&cv.view, &cv.view_layer) } else { (&cv.px, &cv.layer) };
         let f = core.frame.lock().unwrap();
         let comparable = f.w == w && f.h == h;
-        let (mut diff, mut lit) = (0u64, 0u64);
+        let (mut diff, mut lit) = (0u64, 0u64); let mut bb = [usize::MAX, usize::MAX, 0usize, 0usize];
         let mut hs: Vec<String> = Vec::new(); let full = Mask::full(w as u32);
-        let first = &cv.px[..4];
-        let blank = cv.px.chunks_exact(4).all(|p| p == first);
+        let first = &px[..4];
+        let blank = px.chunks_exact(4).all(|p| p == first);
         for y in 0..h {
-            let row = &cv.px[y * rb..(y + 1) * rb]; let lay = &cv.layer[y * w..(y + 1) * w];
+            let row = &px[y * rb..(y + 1) * rb]; let lay = &layer[y * w..(y + 1) * w];
+            let in_sc = scroll_rect.map_or(false, |r| y >= r.y as usize && y < (r.y + r.h) as usize);
+            let xend = if in_sc { w - sbw } else { w };   // 滚动区右缘窄带不比（用左邻列延伸，不是 B 的像素）
             let has_lit = lay.iter().any(|&l| l == LAYER_LIT);
             if has_lit { lit += lay.iter().filter(|&&l| l == LAYER_LIT).count() as u64 }
             if comparable {
                 let fr = &f.buf[y * rb..(y + 1) * rb];
-                if row != fr { for x in 0..w { if lay[x] != LAYER_LIT && row[x * 4..x * 4 + 4] != fr[x * 4..x * 4 + 4] { diff += 1 } } }
+                if row != fr { for x in 0..xend { if lay[x] != LAYER_LIT && row[x * 4..x * 4 + 4] != fr[x * 4..x * 4 + 4] { diff += 1; bb = [bb[0].min(x), bb[1].min(y), bb[2].max(x + 1), bb[3].max(y + 1)] } } }
             }
             if rows {
                 if has_lit { let mut r = row.to_vec(); for x in 0..w { if lay[x] == LAYER_LIT { r[x * 4..x * 4 + 4].fill(0) } } hs.push(format!("{:x}", row_hash_masked(&r, &full))) }
                 else { hs.push(format!("{:x}", row_hash_masked(row, &full))) }
             }
         }
-        j["w"] = w.into(); j["h"] = h.into(); j["diff_px"] = diff.into(); j["lit_px"] = lit.into(); j["blank"] = blank.into(); j["comparable"] = comparable.into();
+        if let Some(sc) = cv.scroll.as_ref() { j["scroll"] = serde_json::json!({"head": sc.head, "y_min": sc.y_min, "y_max": sc.y_max, "at_top": sc.at_top, "at_bottom": sc.at_bottom}) }
+        j["w"] = w.into(); j["h"] = h.into(); j["diff_px"] = diff.into(); j["diff_bbox"] = serde_json::json!(bb); j["lit_px"] = lit.into(); j["blank"] = blank.into(); j["comparable"] = comparable.into();
         if rows { j["rows"] = hs.into() }
     }
     j

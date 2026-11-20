@@ -103,6 +103,10 @@ pub extern "system" fn Java_hj_Native_hints(mut env: JNIEnv, _c: JClass, json: J
     c.kick();   // 提案晚到：已按无损发出的照片要改发 JPEG，压后的条带也可以放行了
 }
 
+/// A 的视口（画布 y）：调试口 `wire View` 走这里；网络上来的 View 在 net.rs 里直接处理
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_view(_env: JNIEnv, _c: JClass, y: jint) { if let Some(c) = core() { c.set_view(y) } }
+
 /// A11y 的 Scroll 区域提案：`[x,y,w,h]` 或 `[]`
 #[no_mangle]
 pub extern "system" fn Java_hj_Native_scrollRegion(mut env: JNIEnv, _c: JClass, json: JString) {
@@ -141,6 +145,7 @@ pub extern "system" fn Java_hj_Native_blank(_env: JNIEnv, _c: JClass) -> jboolea
 #[no_mangle]
 pub extern "system" fn Java_hj_Native_stats(env: JNIEnv, _c: JClass) -> jstring {
     let Some(c) = core() else { return js(&env, "{}") };
+    let req = { let d = c.dbg_req.lock().unwrap(); serde_json::json!([d.0, d.1, d.2, d.3]) };
     let st = c.stats.lock().unwrap();
     let j = serde_json::json!({
         "layers": {"bg": st.layers[0], "lit": st.layers[1], "fg": st.layers[2]},
@@ -148,8 +153,8 @@ pub extern "system" fn Java_hj_Native_stats(env: JNIEnv, _c: JClass) -> jstring 
         "frames": st.frames, "rows": st.rows_sent, "tx_bytes": st.tx_bytes, "tx_msgs": st.tx_msgs,
         "enc_ms_last": st.enc_ms_last, "enc_ms_total": st.enc_ms_total, "inflight": c.inflight(),
         "connected": c.conn.lock().unwrap().is_some(),
-        "wheel_f": *c.wheel_f.lock().unwrap(), "view": *c.view.lock().unwrap(),
-        "scroll": c.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, r)| serde_json::json!({"head": h, "rect": [r.x, r.y, r.w, r.h], "edges": e.scroll_edges(), "n_shift": e.n_shift, "n_reset": e.n_reset, "n_unexplained": e.n_unexplained, "last_unexplained": e.last_unexplained}))),
+        "wheel_f": *c.wheel_f.lock().unwrap(), "req": req, "view": *c.view.lock().unwrap(),
+        "scroll": c.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, r)| serde_json::json!({"head": h, "rect": [r.x, r.y, r.w, r.h], "edges": e.scroll_edges(), "n_shift": e.n_shift, "n_reset": e.n_reset, "n_unexplained": e.n_unexplained, "rows_new": e.n_rows_new, "rows_changed": e.n_rows_changed, "n_pin": e.n_pin, "last_unexplained": e.last_unexplained}))),
     });
     js(&env, &j.to_string())
 }

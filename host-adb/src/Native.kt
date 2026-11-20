@@ -19,6 +19,7 @@ object Native {
     /** A11y 图片矩形提案 [[x,y,w,h],…] */
     @JvmStatic external fun hints(json: String)
     /** A11y 的 Scroll 区域提案："[x,y,w,h]" 或 "[]" */
+    @JvmStatic external fun view(y: Int)
     @JvmStatic external fun scrollRegion(json: String)
     /** 点击换算 + 点前校验：内容坐标 y → {ok, sy} / {ok:false, why} */
     @JvmStatic external fun resolveTap(y: Int, waitMs: Int): String

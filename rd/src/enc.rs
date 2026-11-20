@@ -29,6 +29,8 @@ struct ScrollEnc {
     head: i64,
     known: HashMap<i64, u64>,
     lit: HashSet<i64>,
+    /// 已知内容行上的原地变化先压住：行 → (新 hash, 首次看到的时刻)。稳定超过 `hold_known_ms` 才发；中途变回 A 已有的版本就一个字节都不用发
+    pending: HashMap<i64, (u64, u64)>,
     prev_h: Vec<u64>,
     prev_ok: bool,
     at_top: bool,
@@ -62,6 +64,11 @@ pub struct Encoder {
     pub n_shift: u32,
     pub n_reset: u32,
     pub n_unexplained: u32,
+    pub n_pin: u32,
+    /// 调试统计：Scroll 区域里发出的“新行”（A 没有）/“被改写的行”（A 在该内容位置有别的版本）
+    pub n_rows_new: u64,
+    pub n_rows_changed: u64,
+    skip_prev_diff: bool,
     pub last_unexplained: (usize, usize),
 }
 
@@ -84,7 +91,7 @@ impl Encoder {
         Encoder {
             w, h, cur: vec![0; w * h * 4], shadow: vec![0; w * h * 4], cur_hash: vec![0; h], info: vec![false; h], stale: vec![true; h],
             a_hash: vec![0; h], a_valid: vec![false; h], layer: vec![0; w * h], fmask: Mask::full(w as u32), hints: vec![], defer_since: None,
-            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, last_unexplained: (0, 0),
+            scroll: None, proposal: None, expect: None, last_dy: 0, allow_change_until: 0, n_shift: 0, n_reset: 0, n_unexplained: 0, n_pin: 0, n_rows_new: 0, n_rows_changed: 0, skip_prev_diff: false, last_unexplained: (0, 0),
         }
     }
 
@@ -237,7 +244,7 @@ impl Encoder {
             return Some(self.regions_msg());
         };
         let sb = p.get("sb_w") as u32; let rb = self.w * 4;
-        let mut s = ScrollEnc { rect, smask: column_mask(self.w as u32, sb, &[]), sb, head: ORIGIN as i64, known: HashMap::new(), lit: HashSet::new(), prev_h: vec![], prev_ok: false,
+        let mut s = ScrollEnc { rect, smask: column_mask(self.w as u32, sb, &[]), sb, head: ORIGIN as i64, known: HashMap::new(), lit: HashSet::new(), pending: HashMap::new(), prev_h: vec![], prev_ok: false,
             at_top: false, at_bottom: false, last_known: (0, 0, false, false), last_head: i64::MIN };
         if old.is_none() {
             // 已按 Fixed 发出、A 里有的行 → Copy 进 Scroll 画布，known 里记 hash
@@ -255,6 +262,7 @@ impl Encoder {
             }
         }
         for y in rect.y..rect.y + rect.h { self.a_valid[y as usize] = false }
+        if old.is_some() { ops.push(Op::Clear { region: 1 }) }   // 换了区域（换页）：A 的 Scroll 画布清空重来
         ops.push(Op::Head { region: 1, y: ORIGIN as i32 });
         self.scroll = Some(s);
         Some(self.regions_msg())
@@ -266,7 +274,7 @@ impl Encoder {
         let level = p.get("zstd_level") as i32; let strip = (p.get("strip_rows") as usize).max(1);
         let mut ops: Vec<Op> = vec![];
         self.last_dy = 0;
-        let regions = self.sync_scroll(p, &mut ops, now_ms);
+        let mut regions = self.sync_scroll(p, &mut ops, now_ms);
         let (smask, scroll_rows) = match &self.scroll { Some(s) => (Some(s.smask.clone()), s.rect.y as usize..(s.rect.y + s.rect.h) as usize), None => (None, 0..0) };
         for y in 0..h {
             if self.stale[y] {
@@ -284,7 +292,12 @@ impl Encoder {
 
         // ───────── Scroll 区域 ─────────
         let mut scroll_img_ops: Vec<Op> = vec![];
-        if self.scroll.is_some() { rows += self.encode_scroll(p, now_ms, defer_on, level, strip, &mut ops, &mut scroll_img_ops, &mut deferred); }
+        if self.scroll.is_some() {
+            let before = self.scroll.as_ref().map(|s| s.rect);
+            rows += self.encode_scroll(p, now_ms, defer_on, level, strip, &mut ops, &mut scroll_img_ops, &mut deferred);
+            if self.scroll.as_ref().map(|s| s.rect) != before { regions = Some(self.regions_msg()) }   // 吸顶 / 吸底的行被切出去了
+        }
+        let scroll_rows = match &self.scroll { Some(s) => s.rect.y as usize..(s.rect.y + s.rect.h) as usize, None => 0..0 };
 
         // ───────── Fixed 区域（不含 Scroll 的行）─────────
         let missing: Vec<bool> = (0..h).map(|y| !scroll_rows.contains(&y) && (!self.a_valid[y] || self.a_hash[y] != self.cur_hash[y])).collect();
@@ -368,18 +381,52 @@ impl Encoder {
             let same = ch.iter().zip(&s.prev_h).filter(|(a, b)| a == b).count();
             if same == rh {
                 // 一点没变。预期了滚动却没动 → 到边的迹象由调用方的超时处理（expect_timeout）
-            } else if let Some(sh) = detect_shift(&s.prev_h, &ch, &info, expect, &cfg) {
+            } else if let Some(sh) = { let ev: Vec<bool> = (0..rh).map(|i| info[i] && ch[i] != s.prev_h[i]).collect(); detect_shift(&s.prev_h, &ch, &ev, expect, &cfg) } {   // 只拿“和上一帧同位置不同”的行当证据：吸顶的行不动，不该拖低匹配比例
                 dy = sh.dy; s.head += dy as i64; self.last_dy = dy; self.n_shift += 1;
                 if let Some(e) = expect { if (dy.abs() as f64) < 0.5 * e.abs() as f64 { if e > 0 { s.at_bottom = true } else { s.at_top = true } } else { s.at_top = false; s.at_bottom = false } }
                 self.expect = None;
             } else if (rh - same) as f64 > page_change * rh as f64 { reset = true }
             else { self.n_unexplained += 1; self.last_unexplained = (rh - same, rh); self.expect = None; /* 画面变了只是认不出位移：不是“滚不动”，别记到边 */ }
         }
+        // 吸顶 / 吸底：这一帧有位移时，滚动区顶部（底部）一段行没有跟着动（和上一帧同位置相同、却对不上位移后的位置）→ 切出去当 Fixed，
+        // Scroll 区域缩小（20 §3：吸顶标题 / 浮层）。head 换成新顶行的画布 y，known 不动。
+        let pin_min = p.get("pin_min_rows") as usize;
+        if !reset && dy.abs() >= 16 && s.prev_ok && pin_min > 0 {
+            let moved = |r: usize| { let q = r as i64 + dy as i64; q >= 0 && (q as usize) < rh && ch[r] == s.prev_h[q as usize] };
+            let (mut tp, mut seen) = (0usize, 0usize);
+            for r in 0..rh { if !info[r] { continue } if ch[r] == s.prev_h[r] && !moved(r) { tp = r + 1; seen += 1 } else { break } }
+            if seen < 6 { tp = 0 }
+            let (mut bp, mut seen_b) = (0usize, 0usize);
+            for r in (0..rh).rev() { if !info[r] { continue } if ch[r] == s.prev_h[r] && !moved(r) { bp = rh - r; seen_b += 1 } else { break } }
+            if seen_b < 6 { bp = 0 }
+            if tp < pin_min { tp = 0 } if bp < pin_min { bp = 0 }
+            if (tp > 0 || bp > 0) && rh - tp - bp >= 64 {
+                let new = Rect { x: rect.x, y: rect.y + tp as u32, w: rect.w, h: (rh - tp - bp) as u32 };
+                for r in 0..tp { self.a_valid[y0 + r] = false; self.stale[y0 + r] = true }
+                for r in rh - bp..rh { self.a_valid[y0 + r] = false; self.stale[y0 + r] = true }
+                let s = self.scroll.as_mut().unwrap();
+                s.rect = new; s.head += tp as i64; s.prev_h = ch[tp..rh - bp].to_vec(); s.last_head = i64::MIN;   // 位移已记入 head；上一帧换成这一帧，下面按新区域把缺的行编完
+                self.n_pin += 1; self.skip_prev_diff = true;
+                return self.encode_scroll(p, now_ms, defer_on, level, strip, ops, img_ops, deferred);
+            }
+        }
         if s.head < 1024 || s.head > 2 * ORIGIN as i64 { reset = true }
-        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
+        if reset { self.n_reset += 1; self.allow_change_until = now_ms + 1500; let s = self.scroll.as_mut().unwrap(); s.known.clear(); s.lit.clear(); s.pending.clear(); s.head = ORIGIN as i64; s.at_top = false; s.at_bottom = false; dy = 0; ops.push(Op::Clear { region: 1 }); self.expect = None; }
         let s = self.scroll.as_mut().unwrap();
         // 缺的行（内容坐标）
-        let missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();
+        let mut missing: Vec<bool> = (0..rh).map(|i| s.known.get(&(s.head + i as i64)) != Some(&ch[i])).collect();
+        // 列表异步出图 / 条目重新绑定会先闪一个占位态再变回已缓存的样子：已知内容行上的原地变化先压住，稳定了再发
+        let hold = p.get("hold_known_ms") as u64;
+        if hold > 0 {
+            for i in 0..rh {
+                let cy = s.head + i as i64;
+                if missing[i] && s.known.contains_key(&cy) {
+                    let e = s.pending.entry(cy).or_insert((ch[i], now_ms));
+                    if e.0 != ch[i] { *e = (ch[i], now_ms) }
+                    if now_ms.saturating_sub(e.1) < hold { missing[i] = false; deferred[y0 + i] = true }
+                } else if !missing[i] { s.pending.remove(&cy); }
+            }
+        }
         let mut written = 0u32;
         let mut bands: Vec<(usize, usize, usize, usize)> = vec![];   // 屏幕行 i0..i1（相对 rect），列 x0..x1
         let xmax = w - sb;
@@ -390,7 +437,7 @@ impl Encoder {
             let (mut x0, mut x1) = (xmax, 0usize);
             for ii in i0..i {
                 let cy = s.head + ii as i64; let pj = ii as i64 + dy as i64;
-                if s.known.contains_key(&cy) && pj >= 0 && (pj as usize) < rh && s.prev_ok {
+                if s.known.contains_key(&cy) && pj >= 0 && (pj as usize) < rh && s.prev_ok && !self.skip_prev_diff && !s.pending.contains_key(&cy) {   // 压住过的行：A 手里的版本不是上一帧，只能整行发
                     // 原地变化：和上一帧同一内容位置的行比，收窄列范围
                     let (c, pv) = (&self.cur[(y0 + ii) * rb..(y0 + ii) * rb + xmax * 4], &self.shadow[(y0 + pj as usize) * rb..(y0 + pj as usize) * rb + xmax * 4]);
                     if c == pv { continue }
@@ -431,7 +478,9 @@ impl Encoder {
         let s = self.scroll.as_mut().unwrap();
         for &(i0, i1, _, _) in &bands { for ii in i0..i1 {
             if deferred[y0 + ii] { continue }
-            s.known.insert(s.head + ii as i64, ch[ii]); written += 1;
+            s.pending.remove(&(s.head + ii as i64));
+            if s.known.insert(s.head + ii as i64, ch[ii]).is_some() { self.n_rows_changed += 1 } else { self.n_rows_new += 1 }
+            written += 1;
         } }
         for r in &images { for sy in r.y..r.y + r.h { s.lit.insert(s.head + (sy as i64 - y0 as i64)); } }
         // Head / Known
@@ -452,7 +501,7 @@ impl Encoder {
             }
         }
         // 这一帧就是下一帧的“上一帧”
-        s.prev_h = ch; s.prev_ok = true;
+        s.prev_h = ch; s.prev_ok = true; self.skip_prev_diff = false;
         for r in y0..y0 + rh { self.shadow[r * rb..(r + 1) * rb].copy_from_slice(&self.cur[r * rb..(r + 1) * rb]) }
         written
     }
@@ -703,5 +752,41 @@ mod tests {
         let mut f = scroll_frame(17); for x in 10..60 { let o = (5 * SW + x) * 4; f[o..o + 3].copy_from_slice(&[0, 0, 200]) }   // 标题栏也变了
         let o = srun(&mut e, &mut c, &p, &f, 10);
         assert!(compose_equals(&mut c, &f, 20)); assert!(sbytes(&o) < 6000);
+    }
+
+    #[test] fn pinned_header_is_cut_out_of_scroll_region_and_sent_as_fixed() {
+        // 整个 160 行区域起初都当 Scroll；上面 60 行是吸顶标题（不跟着动）。滚一次就该认出来
+        let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
+        let pin = 60usize;
+        let frame = |off: i64| { let mut f = scroll_frame(off); for y in 0..HDR + pin { let mut r = vec![180u8; SW * 4]; for px in r.chunks_exact_mut(4) { px[3] = 255 } r[(y % 11) * 4] = 5; r[(y % 5 + 40) * 4 + 1] = 99; f[y * SW * 4..(y + 1) * SW * 4].copy_from_slice(&r) } f };
+        e.set_scroll_proposal(Some(Rect { x: 0, y: 0, w: SW as u32, h: SH as u32 }));
+        let mut first = 0;
+        for (i, off) in [0i64, 25, 50, 75, 100].into_iter().enumerate() {
+            let f = frame(off); e.push_frame(&f, SW * 4); let o = e.encode(&p, i as u64 * 10);
+            if let Some(rs) = &o.regions { c.set_regions(rs) }
+            let ap = c.apply(&o.ops).unwrap(); assert!(ap.verify_fail.is_empty(), "校验失败 {:?}", ap.verify_fail);
+            let vy = c.scroll.as_ref().map_or(0, |s| s.head); c.compose(vy);
+            let sc_r = c.scroll.as_ref().map(|s| s.rect);
+            for y in 0..SH { if let Some(r) = sc_r { if y >= r.y as usize && y < (r.y + r.h) as usize { continue } }
+                assert_eq!(c.view[y * SW * 4..y * SW * 4 + (SW - 20) * 4], f[y * SW * 4..y * SW * 4 + (SW - 20) * 4], "第 {i} 帧 固定行 {y} 不一致") }
+            if i == 0 { first = sbytes(&o) } else if i >= 2 { assert!(sbytes(&o) * 3 < first, "第 {i} 帧：吸顶标题不该每次重发 {} vs {}", sbytes(&o), first) }
+        }
+        assert!(e.n_pin >= 1);
+        assert!(e.scroll_head().unwrap().1.y >= 60, "区域上沿应下移到标题之下：{:?}", e.scroll_head());
+    }
+
+    #[test] fn in_place_change_on_known_rows_is_held_and_free_if_it_reverts() {
+        let p = sp(); let (mut e, mut c) = (Encoder::new(SW, SH), Canvas::new(SW, SH)); c.sb = 20;
+        e.set_scroll_proposal(Some(srect()));
+        let f0 = scroll_frame(0); srun(&mut e, &mut c, &p, &f0, 0);
+        // 异步出图：中间闪一个占位态，100 ms 内又变回原样 → 一个字节都不发
+        let mut f1 = f0.clone(); for y in 60..90 { for x in 10..60 { let o = (y * SW + x) * 4; f1[o..o + 3].copy_from_slice(&[120, 120, 120]) } }
+        let o1 = srun(&mut e, &mut c, &p, &f1, 10); assert!(o1.defer && sbytes(&o1) == 0, "原地变化先压住");
+        let o2 = srun(&mut e, &mut c, &p, &f0, 60); assert!(sbytes(&o2) == 0 && !o2.defer, "变回已缓存的样子：零字节");
+        assert!(compose_equals(&mut c, &f0, 20));
+        // 真的变了（开关切换）：稳定超过 hold 之后发
+        srun(&mut e, &mut c, &p, &f1, 100);
+        let o4 = srun(&mut e, &mut c, &p, &f1, 300); assert!(sbytes(&o4) > 0, "稳定后发出");
+        assert!(compose_equals(&mut c, &f1, 20));
     }
 }

@@ -183,10 +183,13 @@ function viewHash(): string {   // 测试用：当前显示的画面（含本地
 function refreshScroll() {
   const n = wasm.rd_scroll_info()
   if (n < 0) { S.sc = null; return }
-  const o = JSON.parse(outText(n)); const first = !S.sc || S.sc.rect.join() !== o.rect.join()
+  const o = JSON.parse(outText(n)); const old = S.sc
+  const sameCols = old && old.rect[0] === o.rect[0] && old.rect[2] === o.rect[2]
+  if (sameCols && old.rect[1] !== o.rect[1]) S.vy += o.rect[1] - old.rect[1]   // 吸顶 / 吸底的行被切出去：区域上沿下移，视口（区域顶行的画布 y）跟着加
+  const first = !old || !sameCols
   S.sc = { rect: o.rect, head: o.head, ymin: o.y_min, ymax: o.y_max, atTop: o.at_top, atBot: o.at_bottom }
-  if (first) { S.vy = o.head; S.follow = true }
-  else if (S.follow) S.vy = o.head
+  if (first) { S.vy = o.head; S.follow = true; sendView() }   // 跟随时也报视口：B 才知道目标就是现在的采集头（否则它会去追旧目标）
+  else if (S.follow) { if (S.vy !== o.head) { S.vy = o.head; sendView() } }
   else if (Math.abs(S.vy - o.head) < 1 && performance.now() - S.lastUser > 300) S.follow = true   // B 追上了，且用户停手一会儿：恢复跟随
 }
 function clampVy(v: number) {

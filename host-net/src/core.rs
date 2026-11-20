@@ -62,6 +62,11 @@ pub struct Core {
     pub req: Mutex<Option<ScrollReq>>,
     /// 滚轮因子（像素 / 格），按实测位移自学（因容器而异：RecyclerView 168，设置首页的 ScrollView 约 357）
     pub wheel_f: Mutex<f64>,
+    /// 调试统计：请求数 / 超时数 / 最近一次的 (step, notches)
+    pub dbg_req: Mutex<(u32, u32, i32, f64)>,
+    last_resets: std::sync::atomic::AtomicU32,
+    f_learned: std::sync::atomic::AtomicBool,
+    timeouts: std::sync::atomic::AtomicU32,
 }
 
 pub const PAGE: PageId = 1;
@@ -76,7 +81,7 @@ impl Core {
             up_tx, up_rx: Mutex::new(up_rx), params: Mutex::new(Params::new()), apps: Mutex::new(vec![]), token,
             conn: Mutex::new(None), conn_seq: AtomicU64::new(0), enc: Mutex::new(None), frame: Mutex::new(Frame { buf: vec![], w: 0, h: 0 }),
             work: Mutex::new(Work::default()), cv: Condvar::new(), tx_seq: AtomicU64::new(0), sent: AtomicU64::new(0), acked: AtomicU64::new(0),
-            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None), view: Mutex::new(None), req: Mutex::new(None), wheel_f: Mutex::new(168.0),
+            pending: Mutex::new(VecDeque::new()), stats: Mutex::new(StatsAcc::default()), rev: AtomicU64::new(0), t0: Instant::now(), last_push: Mutex::new(Instant::now()), deferring: std::sync::atomic::AtomicBool::new(false), va: Mutex::new(None), view: Mutex::new(None), req: Mutex::new(None), wheel_f: Mutex::new(168.0), dbg_req: Mutex::new((0, 0, 0, 0.0)), last_resets: std::sync::atomic::AtomicU32::new(0), f_learned: std::sync::atomic::AtomicBool::new(false), timeouts: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -130,6 +135,7 @@ impl Core {
         }
         *self.stats.lock().unwrap() = StatsAcc::default();
         self.rev.store(0, Ordering::Relaxed);
+        *self.view.lock().unwrap() = None; *self.req.lock().unwrap() = None;   // 新会话：A 的视口还没报，不追旧目标
         let seq = self.next_seq();
         self.send_tx(seq, &Down::Page { seq, id: PAGE, op: PageOp::Replace, temp: true, modal: None, at_root: true,
             regions: vec![Region { id: 0, kind: RegionKind::Fixed { anchor: 0, z: 0 }, rect: Rect { x: 0, y: 0, w: w as u32, h: h as u32 }, start_y: 0 }] });
@@ -139,6 +145,13 @@ impl Core {
     /// 链路空闲：没有待编的帧 / 催促 / 压后条带，发出的都已被 A 应用，且最近一次推帧已过去一段时间
     pub fn is_idle(&self) -> bool {
         let w = self.work.lock().unwrap();
+        // 滚动：没有在途的滚动请求，且采集头已经追上 A 报的视口。（锁一个取一个、立刻放：drive_scroll 是 enc → req → view 的顺序）
+        if self.req.lock().unwrap().is_some() { return false }
+        let view = *self.view.lock().unwrap();
+        let sc = self.enc.lock().unwrap().as_ref().and_then(|e| e.scroll_head().map(|(h, _)| (h, e.scroll_edges())));
+        if let (Some(v), Some((head, (top, bot)))) = (view, sc) {
+            let diff = v as i64 - head; if diff != 0 && !((diff > 0 && bot) || (diff < 0 && top)) { return false }
+        }
         let applied = self.va.lock().unwrap().as_ref().map_or(self.tx_seq.load(Ordering::Relaxed), |v| v.applied_seq);
         !w.dirty && !w.kick && !self.deferring.load(Ordering::Relaxed) && applied == self.tx_seq.load(Ordering::Relaxed)
             && self.last_push.lock().unwrap().elapsed() >= Duration::from_millis(250)
@@ -157,20 +170,26 @@ impl Core {
             if shift != 0 {
                 let mut f = self.wheel_f.lock().unwrap();
                 *f = rd::heuristics::update_wheel_factor(*f, r.notches.abs(), r.step as f64, shift as f64);
+                self.f_learned.store(true, Ordering::Relaxed); self.timeouts.store(0, Ordering::Relaxed);
                 *req = None;
-            } else if r.t.elapsed() > Duration::from_millis(300) { enc.expect_timeout(); *req = None } else { return }
+            } else if r.t.elapsed() > Duration::from_millis(700) {
+                // 一次没响应可能只是慢（注入 + 出帧 + 合并等待）：重发一次；连续两次才算“滚不动了”= 到边
+                if self.timeouts.fetch_add(1, Ordering::Relaxed) >= 1 { enc.expect_timeout(); self.timeouts.store(0, Ordering::Relaxed) } else { enc.set_expect(None) }
+                *req = None; self.dbg_req.lock().unwrap().1 += 1
+            } else { return }
         }
         let Some(ty) = *self.view.lock().unwrap() else { return };
         let diff = ty as i64 - head;
         if diff == 0 { return }
         let (top, bot) = enc.scroll_edges();
         if (diff > 0 && bot) || (diff < 0 && top) { return }
-        let max = (rect.h as i64 * 6 / 10).max(8);
+        // 滚轮因子还没量过（因容器而异，差 2 倍以上）：先走一小步量出来，免得第一步冲过头
+        let max = if self.f_learned.load(Ordering::Relaxed) { (rect.h as i64 * 6 / 10).max(8) } else { 160 };
         let step = diff.clamp(-max, max) as i32;
         let f = *self.wheel_f.lock().unwrap();
         let notches = (step.abs() as f64 + 0.5) / f * step.signum() as f64;
         enc.set_expect(Some(step));
-        *req = Some(ScrollReq { t: Instant::now(), notches, step });
+        *req = Some(ScrollReq { t: Instant::now(), notches, step }); { let mut d = self.dbg_req.lock().unwrap(); d.0 += 1; d.2 = step; d.3 = notches; }
         self.up_event(format!("{{\"ev\":\"scroll\",\"x\":{},\"y\":{},\"notches\":{:.5}}}", self.frame.lock().unwrap().w / 2, rect.y + rect.h / 2, notches));
     }
 
@@ -223,12 +242,14 @@ impl Core {
 /// 编码线程。永不返回。
 pub fn encoder_loop(core: Arc<Core>) {
     loop {
-        // 1. 等活：有新帧或有人催（会话开始 / 参数变了），并且有连接、有会话
+        // 1. 等活：有新帧或有人催（会话开始 / 参数变了 / 视口变了），并且有连接、有会话
         {
             let mut w = core.work.lock().unwrap();
             loop {
                 let ready = (w.dirty || w.kick) && core.conn.lock().unwrap().is_some() && core.enc.lock().unwrap().is_some();
                 if ready { break }
+                // 有在途的滚动请求却一直没有帧响应（滚不动了）：到时间要能判超时，不能等下一帧
+                if core.req.lock().unwrap().is_some() { drop(w); core.drive_scroll(0); std::thread::sleep(Duration::from_millis(30)); w = core.work.lock().unwrap(); continue }
                 w = core.cv.wait_timeout(w, Duration::from_millis(200)).unwrap().0;
             }
         }
@@ -256,13 +277,15 @@ pub fn encoder_loop(core: Arc<Core>) {
         // 3. 编
         let p = core.params.lock().unwrap().clone();
         let t = Instant::now();
-        let (ops, rows, defer, regions, shift) = {
+        let (ops, rows, defer, regions, shift, resets) = {
             let mut g = core.enc.lock().unwrap();
             let Some(enc) = g.as_mut() else { continue };
             { let f = core.frame.lock().unwrap(); if f.w == enc.w && f.h == enc.h { enc.push_frame(&f.buf, f.w * 4); } }
-            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy)
+            let o = enc.encode(&p, core.t0.elapsed().as_millis() as u64); (o.ops, o.rows, o.defer, o.regions, enc.last_dy, enc.n_reset)
         };
         let more = defer; core.deferring.store(more, Ordering::Relaxed);
+        // 换页（滚动画布被清空）：旧视口目标作废，等 A 重新报
+        if resets != core.last_resets.swap(resets, Ordering::Relaxed) { *core.view.lock().unwrap() = None; *core.req.lock().unwrap() = None }
         core.drive_scroll(shift);
         if let Some(rs) = regions { let seq = core.next_seq(); core.send_tx(seq, &Down::Regions { seq, page: PAGE, regions: rs }); }
         if ops.is_empty() { if more { std::thread::sleep(Duration::from_millis(50)); core.kick() } continue }

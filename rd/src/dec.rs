@@ -92,7 +92,11 @@ impl Canvas {
     /// 区域列表（`Page` / `Regions`）：有 Scroll 区域就建（矩形变了就重建），没有就撤。
     pub fn set_regions(&mut self, rs: &[Region]) {
         match rs.iter().find(|r| matches!(r.kind, RegionKind::Scroll)) {
-            Some(r) => { if self.scroll.as_ref().map_or(true, |s| s.rect != r.rect) { self.scroll = Some(ScrollCanvas::new(r.rect)) } }
+            Some(r) => match self.scroll.as_mut() {
+                // 只是上下缩了（吸顶 / 吸底的行被切成 Fixed）：画布内容保留；换了别的矩形（换页）才重建
+                Some(s) if s.rect.x == r.rect.x && s.rect.w == r.rect.w => s.rect = r.rect,
+                _ => self.scroll = Some(ScrollCanvas::new(r.rect)),
+            },
             None => self.scroll = None,
         }
     }

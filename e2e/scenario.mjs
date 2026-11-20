@@ -100,6 +100,17 @@ async function vaIdle(timeout = 12000) {   // 链路空闲（连续 3 次）
   while (Date.now() - t0 < timeout) { const v = await vaState(false); ok = v.idle ? ok + 1 : 0; if (ok >= 3) return v; await sleep(120) }
   return await vaState(false)
 }
+/** 扮演 A 的视口：不断报同一个目标，直到采集头到位或到边（B 在换页 / 加载时会丢掉旧目标，A 本来就会重报） */
+async function moveHead(target, timeoutMs = 9000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    await wire({ View: { page: 1, region: 1, y: target, vy: 0 } }); await sleep(250)
+    const v = await vaState(false); if (!v.scroll) break
+    if (Math.abs(v.scroll.head - target) <= 2) break
+    if ((target > v.scroll.head && v.scroll.at_bottom) || (target < v.scroll.head && v.scroll.at_top)) break
+  }
+  return await vaIdle()
+}
 async function runLive(sc, pkg) {
   const marks = {}, log = []; let first = null
   await h.ok({ cmd: 'policy', allow: sc.policy ?? ['[popup]'] }); await h.ok({ cmd: 'param', key: 'verify', val: 1 })   // 通用场景会点进任意子页（含设置的搜索），所以放行临时窗口；off-whitelist 之类的场景用 sc.policy 覆盖
@@ -124,7 +135,20 @@ async function runLive(sc, pkg) {
       await wire({ Tap: { page: 1, at: { region: 0, x: p.x, y: p.y } } })
     } else if (op === 'back') { await wire('Back'); await sleep(300) }
     else if (op === 'type') await wire({ Text: { s: a } })
-    else if (op === 'scrollBy') return { log, marks, skip: '本地滚动是 M2；M1 的 Wheel 只透传' }
+    else if (op === 'scrollBy') {
+      // A 的本地滚动：视口（画布 y）往目标走，B 的采集头去追。每步 ≤ 700 px，每步等链路空闲；到边（采集头不再动）就停
+      let v = await vaIdle()
+      for (let i = 0; i < 20 && !v.scroll; i++) { await sleep(250); v = await vaIdle() }   // A11y 提案总是晚于画面
+      if (!v.scroll) return { log, marks, skip: '没有 Scroll 区域（A11y 没给出可滚动节点）' }
+      let left = Math.abs(a), moved = 0; const dir = a >= 0 ? 1 : -1
+      while (left > 0) {
+        const n = Math.min(700, left), before = v.scroll.head
+        v = await moveHead(before + dir * n); const dy = v.scroll.head - before
+        if (Math.abs(dy) < n * 0.5) break   // 到边
+        left -= n; moved += dy
+      }
+      log.push(`scrollBy ${a} 实际 ${moved}px`)
+    }
     else throw new Error('未知原语 ' + op)
     log.push(`${op}${a !== undefined ? ' ' + JSON.stringify(a) : ''} ${Date.now() - t0}ms`)
   }
@@ -155,7 +179,7 @@ for (const n of names) {
       runs.push(r)
       const res = { ...r, same: (a, b) => LIVE ? sameLive(r.marks, a, b) : same(r.marks, a, b) }
       const gone = LIVE && r.err && /没有会话/.test(r.err)
-      const why = gone ? null : r.err ? '出错: ' + r.err : r.skip ? null : (sc.check(res) || (LIVE ? liveProps(r) : null))
+      const why = gone ? null : r.err ? '出错: ' + r.err : r.skip ? null : [sc.check(res), LIVE ? liveProps(r) : null].filter(Boolean).join('；') || null
       if (LIVE && r.err && /没有会话/.test(r.err)) { r.err = null; r.skip = '该步让 App 退出了（根页 Back → AppGone，会话按策略结束），场景不适用' }
       const tag = r.err ? '✗' : r.skip ? '–' : why ? '✗' : '✓'
       console.log(`${tag} ${sc.name.padEnd(15)} ${pkg}${r.skip ? '  跳过：' + r.skip : ''}${why ? '  ' + why : ''}${r.trace ? '  → ' + path.relative(process.cwd(), r.trace) : ''}${r.live && r.final?.first ? `  首屏 ${(r.final.first.bytes / 1000).toFixed(0)} KB / ${r.final.first.ms} ms` : ''}`)

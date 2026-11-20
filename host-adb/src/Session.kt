@@ -137,7 +137,8 @@ class Session(private val dbg: Debug, private val pf: Platform, private val a11y
             "ClipSet" -> pf.clipSet(b.getString("s"))
             "ClipGet" -> sendClip()
             "Resync" -> if (active) resend()
-            "View", "Forget", "Persisted", "Inventory", "VerifyFail" -> {}   // M2/M3 才有用
+            "View" -> Native.view(b.getInt("y"))   // 经调试口 wire 的 View；网络上来的 View 在 Rust 里直接处理
+            "Forget", "Persisted", "Inventory", "VerifyFail" -> {}   // M2/M3 才有用
             else -> log("忽略 Up::$name")
         }
     }
