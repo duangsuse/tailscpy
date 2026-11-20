@@ -163,6 +163,7 @@ class Debug(private val port: Int, private val pf: Platform, private val a11y: A
             "net" -> return ok().put("net", session?.info ?: JSONObject()).put("allow", JSONArray((session?.allow ?: emptySet<String>()).toList())).put("active", session?.active ?: false)
             "net_stats" -> return ok().put("stats", JSONObject(Native.stats()))
             "va_attach" -> { Native.vaAttach(r.optBoolean("on", true)); return ok() }
+            "va_cmp" -> return ok().put("cmp", JSONObject(Native.vaCmp(r.optInt("y0", 1048576), r.optInt("y1", 1048576 + 3000))))
             "va_log" -> return ok().put("log", JSONArray(Native.vaLog()))
             "va_dump" -> return ok().put("r", Native.vaDump(r.getString("path")))
             "va_state" -> return ok().put("va", JSONObject(Native.vaState(r.optBoolean("rows"))))

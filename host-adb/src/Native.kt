@@ -33,5 +33,6 @@ object Native {
     @JvmStatic external fun vaState(rows: Boolean): String
     @JvmStatic external fun vaDump(path: String): String
     @JvmStatic external fun vaLog(): String
+    @JvmStatic external fun vaCmp(y0: Int, y1: Int): String
     fun load(path: String) { System.load(path) }
 }

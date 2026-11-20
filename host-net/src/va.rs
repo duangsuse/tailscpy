@@ -96,7 +96,7 @@ pub fn state(core: &Arc<Core>, rows: bool) -> serde_json::Value {
             }
             if rows {
                 // 滚动区右缘窄带不属于“A 承诺的内容”（B 不发，A 用左邻列延伸）：行 hash 不含它
-                let m = if in_sc { Mask::excluding(w as u32, &[(xend as u32, w as u32)]) } else { full.clone() };
+                let m = if scroll_rect.is_some() { Mask::excluding(w as u32, &[((w - sbw) as u32, w as u32)]) } else { full.clone() };   // 有 Scroll 区域时所有行都不含窄带：区域边界会变（吸顶切出），hash 的定义不能跟着变
                 if has_lit { let mut r = row.to_vec(); for x in 0..w { if lay[x] == LAYER_LIT { r[x * 4..x * 4 + 4].fill(0) } } hs.push(format!("{:x}", row_hash_masked(&r, &m))) }
                 else { hs.push(format!("{:x}", row_hash_masked(row, &m))) }
             }
@@ -117,3 +117,13 @@ pub fn dump(core: &Arc<Core>, path: &str) -> Result<usize, String> {
 }
 
 pub fn log(core: &Arc<Core>) -> Vec<String> { core.va.lock().unwrap().as_ref().map_or(vec![], |v| v.log.iter().cloned().collect()) }
+
+/// 调试：B 的 known 与 A 画布在内容行 [y0, y1) 上的对账，返回不一致的行 JSON
+pub fn dbg_cmp(core: &Arc<Core>, y0: i64, y1: i64) -> serde_json::Value {
+    let known = core.enc.lock().unwrap().as_ref().map(|e| e.dbg_known(y0, y1)).unwrap_or_default();
+    let g = core.va.lock().unwrap();
+    let Some(cv) = g.as_ref().and_then(|v| v.canvas.as_ref()) else { return serde_json::json!({"err": "没有虚拟 A"}) };
+    let a: std::collections::HashMap<i32, Option<u64>> = cv.dbg_rows(y0 as i32, y1 as i32).into_iter().collect();
+    let bad: Vec<i64> = known.iter().filter(|(y, h)| a.get(&(*y as i32)).copied().flatten() != Some(*h)).map(|(y, _)| *y - 1048576).collect();
+    serde_json::json!({"known": known.len(), "bad": bad.len(), "bad_rows": if bad.len() > 80 { bad.iter().step_by(bad.len() / 40).cloned().collect::<Vec<_>>() } else { bad }})
+}

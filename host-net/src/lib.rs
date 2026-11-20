@@ -194,3 +194,7 @@ pub extern "system" fn Java_hj_Native_vaDump(mut env: JNIEnv, _c: JClass, path: 
 /// 调试：虚拟 A 最近收到的 Tx 的 Op 摘要（JSON 数组）
 #[no_mangle]
 pub extern "system" fn Java_hj_Native_vaLog(env: JNIEnv, _c: JClass) -> jstring { match core() { Some(c) => js(&env, &serde_json::to_string(&va::log(c)).unwrap()), None => js(&env, "[]") } }
+
+/// 调试：B 的 known 与 A 画布对账（内容行 [y0, y1)，相对 ORIGIN 之外的绝对画布 y）
+#[no_mangle]
+pub extern "system" fn Java_hj_Native_vaCmp(env: JNIEnv, _c: JClass, y0: jint, y1: jint) -> jstring { match core() { Some(c) => js(&env, &va::dbg_cmp(c, y0 as i64, y1 as i64).to_string()), None => js(&env, "{}") } }

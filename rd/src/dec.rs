@@ -277,4 +277,11 @@ impl Canvas {
         }
         out
     }
+
+    /// 调试：Scroll 画布 [y0, y1) 行的 hash（不含窄带；没有内容的行是 None）
+    pub fn dbg_rows(&self, y0: i32, y1: i32) -> Vec<(i32, Option<u64>)> {
+        let Some(sc) = self.scroll.as_ref() else { return vec![] };
+        let mask = Mask::excluding(self.w as u32, &[((self.w - self.sb) as u32, self.w as u32)]);
+        (y0..y1).map(|y| (y, sc.row(y, self.w).map(|(r, _)| row_hash_masked(r, &mask)))).collect()
+    }
 }

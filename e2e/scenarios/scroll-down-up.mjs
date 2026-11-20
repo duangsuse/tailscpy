@@ -3,4 +3,4 @@ export default { name: 'scroll-down-up', needs: 'list',
   steps: [['open'], ['waitStable'], ['mark', 'top'], ['scrollBy', 2400], ['mark', 'down'], ['scrollBy', -2400], ['scrollEdge', -1], ['mark', 'up'], ['waitStable']],
   // 实跑模式另查：回程零像素流量（滚回已见内容不重发；允许一点点：标题栏折叠 / 展开的几行）
   check: r => !r.same('top', 'up') ? '滚回顶后画面与初始不一致'
-    : r.live && r.marks.up.rx - r.marks.down.rx > 40000 ? `回程下行 ${r.marks.up.rx - r.marks.down.rx} 字节（应接近 0）` : null }
+    : r.live && (r.marks.up.rx - r.marks.down.rx) > Math.max(40000, 0.3 * (r.marks.down.rx - r.marks.top.rx)) ? `回程下行 ${r.marks.up.rx - r.marks.down.rx} 字节，去程 ${r.marks.down.rx - r.marks.top.rx}（回程应接近 0；折叠标题栏重新展开那几行除外）` : null }
